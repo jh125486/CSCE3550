@@ -1,0 +1,28 @@
+#!/bin/bash
+# Pre-push hook to run tests and linting before allowing a push
+# This ensures that code pushed to remote passes all quality checks
+
+set -e
+
+echo "🔍 Running pre-push checks..."
+echo ""
+
+# Get the repository root directory
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+# Run linting
+echo "📝 Running checks..."
+if ! make check; then
+    echo ""
+    echo "❌ checks failed. Please fix the issues before pushing."
+    echo "   You can run 'make check' to see the errors."
+    exit 1
+fi
+
+echo "✅ All tests passed"
+echo ""
+echo "✨ All pre-push checks passed! Proceeding with push..."
+echo ""
+
+exit 0

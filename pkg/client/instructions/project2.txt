@@ -1,0 +1,9 @@
+Evaluate:
+1. Code organization and structure
+2. Best practices adherence for the language(s) used
+3. Code readability and documentation
+4. Overall code quality
+5. Database query security and parameterization
+
+- Do not decorate response with formatting, e.g. markdown, bold, italics, etc.
+- Keep the feedback as concise as possible.
