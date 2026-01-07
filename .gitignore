@@ -19,3 +19,7 @@
 
 # Go workspace file
 go.work
+
+gradebot
+
+totally_not_my_privateKeys.db

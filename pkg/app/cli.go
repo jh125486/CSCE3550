@@ -5,6 +5,7 @@ import (
 	basecli "github.com/jh125486/gradebot/pkg/cli"
 	baseclient "github.com/jh125486/gradebot/pkg/client"
 	"github.com/jh125486/gradebot/pkg/proto/protoconnect"
+	"github.com/jh125486/gradebot/pkg/rubrics"
 )
 
 type (
@@ -38,14 +39,21 @@ type (
 // Run executes the Project 1 grading client.
 func (cmd *Project1Cmd) Run(ctx basecli.Context) error {
 	cfg := &baseclient.Config{
-		ServerURL:      cmd.ServerURL,
-		Dir:            cmd.Dir,
-		RunCmd:         cmd.RunCmd,
-		QualityClient:  protoconnect.NewQualityServiceClient(cmd.Client, cmd.ServerURL),
-		RubricClient:   protoconnect.NewRubricServiceClient(cmd.Client, cmd.ServerURL),
-		Reader:         cmd.Stdin,
-		Writer:         cmd.Stdout,
-		CommandFactory: cmd.CommandFactory,
+		ServerURL:     cmd.ServerURL,
+		Dir:           cmd.Dir,
+		RunCmd:        cmd.RunCmd,
+		QualityClient: protoconnect.NewQualityServiceClient(cmd.Client, cmd.ServerURL),
+		Reader:        cmd.Stdin,
+		Writer:        cmd.Stdout,
+		CommandFactory: &rubrics.ExecCommandFactory{
+			Context: ctx,
+			Env:     cmd.Env,
+		},
+	}
+
+	// Only set RubricClient if a server URL is provided
+	if cmd.ServerURL != "" {
+		cfg.RubricClient = protoconnect.NewRubricServiceClient(cmd.Client, cmd.ServerURL)
 	}
 
 	return client.ExecuteProject1(ctx, cfg, cmd.Port)
@@ -54,14 +62,21 @@ func (cmd *Project1Cmd) Run(ctx basecli.Context) error {
 // Run executes the Project 2 grading client.
 func (cmd *Project2Cmd) Run(ctx basecli.Context) error {
 	cfg := &baseclient.Config{
-		ServerURL:      cmd.ServerURL,
-		Dir:            cmd.Dir,
-		RunCmd:         cmd.RunCmd,
-		QualityClient:  protoconnect.NewQualityServiceClient(cmd.Client, cmd.ServerURL),
-		RubricClient:   protoconnect.NewRubricServiceClient(cmd.Client, cmd.ServerURL),
-		Reader:         cmd.Stdin,
-		Writer:         cmd.Stdout,
-		CommandFactory: cmd.CommandFactory,
+		ServerURL:     cmd.ServerURL,
+		Dir:           cmd.Dir,
+		RunCmd:        cmd.RunCmd,
+		QualityClient: protoconnect.NewQualityServiceClient(cmd.Client, cmd.ServerURL),
+		Reader:        cmd.Stdin,
+		Writer:        cmd.Stdout,
+		CommandFactory: &rubrics.ExecCommandFactory{
+			Context: ctx,
+			Env:     cmd.Env,
+		},
+	}
+
+	// Only set RubricClient if a server URL is provided
+	if cmd.ServerURL != "" {
+		cfg.RubricClient = protoconnect.NewRubricServiceClient(cmd.Client, cmd.ServerURL)
 	}
 
 	return client.ExecuteProject2(ctx, cfg, cmd.Port, cmd.DatabaseFile, cmd.CodeDir)
@@ -70,14 +85,21 @@ func (cmd *Project2Cmd) Run(ctx basecli.Context) error {
 // Run executes the Project 3 grading client.
 func (cmd *Project3Cmd) Run(ctx basecli.Context) error {
 	cfg := &baseclient.Config{
-		ServerURL:      cmd.ServerURL,
-		Dir:            cmd.Dir,
-		RunCmd:         cmd.RunCmd,
-		QualityClient:  protoconnect.NewQualityServiceClient(cmd.Client, cmd.ServerURL),
-		RubricClient:   protoconnect.NewRubricServiceClient(cmd.Client, cmd.ServerURL),
-		Reader:         cmd.Stdin,
-		Writer:         cmd.Stdout,
-		CommandFactory: cmd.CommandFactory,
+		ServerURL:     cmd.ServerURL,
+		Dir:           cmd.Dir,
+		RunCmd:        cmd.RunCmd,
+		QualityClient: protoconnect.NewQualityServiceClient(cmd.Client, cmd.ServerURL),
+		Reader:        cmd.Stdin,
+		Writer:        cmd.Stdout,
+		CommandFactory: &rubrics.ExecCommandFactory{
+			Context: ctx,
+			Env:     cmd.Env,
+		},
+	}
+
+	// Only set RubricClient if a server URL is provided
+	if cmd.ServerURL != "" {
+		cfg.RubricClient = protoconnect.NewRubricServiceClient(cmd.Client, cmd.ServerURL)
 	}
 
 	return client.ExecuteProject3(ctx, cfg, cmd.Port, cmd.DatabaseFile, cmd.CodeDir)
