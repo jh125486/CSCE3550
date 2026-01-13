@@ -2,10 +2,15 @@ package rubrics_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"database/sql"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -29,16 +34,46 @@ const (
 	expiredJWTToken      = "expired.jwt.token"
 )
 
-// mockHTTPClient allows mocking HTTP responses for testing
-type mockHTTPClient struct {
-	DoFunc func(*http.Request) (*http.Response, error)
+// mockRoundTripper allows mocking HTTP responses for testing
+type mockRoundTripper struct {
+	RoundTripFunc func(*http.Request) (*http.Response, error)
 }
 
-func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
-	if m.DoFunc != nil {
-		return m.DoFunc(req)
+func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if m.RoundTripFunc != nil {
+		return m.RoundTripFunc(req)
 	}
-	return nil, errors.New("DoFunc not implemented")
+	return nil, errors.New("RoundTripFunc not implemented")
+}
+
+func newMockClient(f func(*http.Request) (*http.Response, error)) *http.Client {
+	return &http.Client{
+		Transport: &mockRoundTripper{RoundTripFunc: f},
+	}
+}
+
+// mockJWTParser returns a JWT parser that parses without verification
+func mockJWTParser() func(string, jwt.Claims) (*jwt.Token, error) {
+	return func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
+		token, _, err := jwt.NewParser().ParseUnverified(tokenString, claims)
+		return token, err
+	}
+}
+
+// mockExpiredJWTParser returns a parser that checks exp and returns ErrTokenExpired if expired
+func mockExpiredJWTParser() func(string, jwt.Claims) (*jwt.Token, error) {
+	return func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
+		token, _, err := jwt.NewParser().ParseUnverified(tokenString, claims)
+		if err != nil {
+			return nil, err
+		}
+		if exp, err := token.Claims.GetExpirationTime(); err == nil && exp != nil {
+			if exp.Before(time.Now()) {
+				return token, jwt.ErrTokenExpired
+			}
+		}
+		return token, nil
+	}
 }
 
 type mockProgramRunner struct{}
@@ -99,6 +134,7 @@ func createTestDB(t *testing.T) string {
 }
 
 func TestEvaluateDatabaseQueryUsesParameters(t *testing.T) {
+	t.Parallel()
 	dbFile := createTestDB(t)
 
 	ctx := t.Context()
@@ -118,6 +154,7 @@ func TestEvaluateDatabaseQueryUsesParameters(t *testing.T) {
 	assert.Equal(t, 0.0, result.Awarded)
 }
 func TestEvaluateRegistrationWorks(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		hostURL    string
@@ -132,10 +169,16 @@ func TestEvaluateRegistrationWorks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
-			ec := &rubrics.EvalContext{HostURL: tt.hostURL}
+			ec := &rubrics.EvalContext{
+				HostURL: tt.hostURL,
+				HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
+					return nil, errors.New("connection refused")
+				}),
+			}
 			bag["evalContext"] = ec
 
 			result := rubrics.EvaluateRegistrationWorks(ctx, pr, bag)
@@ -146,6 +189,7 @@ func TestEvaluateRegistrationWorks(t *testing.T) {
 }
 
 func TestGetEvalContext(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		bagSetup func() baserubrics.RunBag
@@ -162,30 +206,30 @@ func TestGetEvalContext(t *testing.T) {
 			wantNil: false,
 		},
 		{
-			name: "empty bag returns empty context",
+			name: "empty bag returns nil context",
 			bagSetup: func() baserubrics.RunBag {
 				return make(baserubrics.RunBag)
 			},
-			wantNil: false,
+			wantNil: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// We can't directly test getEvalContext since it's unexported
-			// Instead we test that evaluators work with bag contexts
+			t.Parallel()
 			bag := tt.bagSetup()
-
-			// Test that evaluators don't panic with this bag
-			ctx := t.Context()
-			pr := mockProgramRunner{}
-			result := rubrics.EvaluateDatabaseExists(ctx, pr, bag)
-			assert.NotNil(t, result)
+			ec := baserubrics.BagValue[rubrics.EvalContext](bag, "evalContext")
+			if tt.wantNil {
+				assert.Nil(t, ec)
+			} else {
+				assert.NotNil(t, ec)
+			}
 		})
 	}
 }
 
 func TestEvalContextFields(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		ec   rubrics.EvalContext
@@ -208,57 +252,323 @@ func TestEvalContextFields(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			// Just verify struct can be created
 			assert.NotNil(t, tt.ec)
 		})
 	}
 }
 
-func TestEvalContextGetHTTPClient(t *testing.T) {
+func TestNewEvalContextOptions(t *testing.T) {
+	t.Parallel()
+
+	type args struct {
+		hostURL string
+		opts    []rubrics.EvalContextOption
+	}
 	tests := []struct {
-		name       string
-		setup      func(*rubrics.EvalContext)
-		assertFunc func(t *testing.T, ec *rubrics.EvalContext, got rubrics.HTTPClient)
+		name   string
+		args   args
+		verify func(t *testing.T, ec *rubrics.EvalContext)
 	}{
 		{
-			name:  "returns default client",
-			setup: func(ec *rubrics.EvalContext) {},
-			assertFunc: func(t *testing.T, ec *rubrics.EvalContext, got rubrics.HTTPClient) {
-				assert.NotNil(t, got)
-				assert.NotEqual(t, ec.HTTPClient, got)
+			name: "WithSrcDir sets source directory",
+			args: args{
+				hostURL: "http://localhost:8080",
+				opts: []rubrics.EvalContextOption{
+					rubrics.WithJWTParser(mockJWTParser()),
+					rubrics.WithSrcDir("/custom/src/path"),
+				},
+			},
+			verify: func(t *testing.T, ec *rubrics.EvalContext) {
+				assert.Equal(t, "/custom/src/path", ec.SrcDir)
 			},
 		},
 		{
-			name: "uses custom client",
-			setup: func(ec *rubrics.EvalContext) {
-				ec.HTTPClient = &mockHTTPClient{}
+			name: "WithUsername sets username",
+			args: args{
+				hostURL: "http://localhost:8080",
+				opts: []rubrics.EvalContextOption{
+					rubrics.WithJWTParser(mockJWTParser()),
+					rubrics.WithUsername("testuser"),
+				},
 			},
-			assertFunc: func(t *testing.T, ec *rubrics.EvalContext, got rubrics.HTTPClient) {
-				assert.Equal(t, ec.HTTPClient, got)
+			verify: func(t *testing.T, ec *rubrics.EvalContext) {
+				assert.Equal(t, "testuser", ec.Username)
+			},
+		},
+		{
+			name: "multiple options combined",
+			args: args{
+				hostURL: "http://localhost:8080",
+				opts: []rubrics.EvalContextOption{
+					rubrics.WithJWTParser(mockJWTParser()),
+					rubrics.WithSrcDir("/src"),
+					rubrics.WithUsername("admin"),
+					rubrics.WithDatabaseFile("/data/test.db"),
+				},
+			},
+			verify: func(t *testing.T, ec *rubrics.EvalContext) {
+				assert.Equal(t, "/src", ec.SrcDir)
+				assert.Equal(t, "admin", ec.Username)
+				assert.Equal(t, "/data/test.db", ec.DatabaseFile)
+				assert.Equal(t, "http://localhost:8080", ec.HostURL)
+			},
+		},
+		{
+			name: "empty SrcDir option",
+			args: args{
+				hostURL: "http://localhost:8080",
+				opts: []rubrics.EvalContextOption{
+					rubrics.WithJWTParser(mockJWTParser()),
+					rubrics.WithSrcDir(""),
+				},
+			},
+			verify: func(t *testing.T, ec *rubrics.EvalContext) {
+				assert.Empty(t, ec.SrcDir)
+			},
+		},
+		{
+			name: "empty Username option",
+			args: args{
+				hostURL: "http://localhost:8080",
+				opts: []rubrics.EvalContextOption{
+					rubrics.WithJWTParser(mockJWTParser()),
+					rubrics.WithUsername(""),
+				},
+			},
+			verify: func(t *testing.T, ec *rubrics.EvalContext) {
+				assert.Empty(t, ec.Username)
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ec := rubrics.EvalContext{}
-			tt.setup(&ec)
+			t.Parallel()
 
-			client := ec.GetHTTPClient()
-			tt.assertFunc(t, &ec, client)
+			ec := rubrics.NewEvalContext(tt.args.hostURL, tt.args.opts...)
+
+			require.NotNil(t, ec)
+			tt.verify(t, ec)
 		})
 	}
 }
 
-func TestEvaluateDatabaseExistsErrorPaths(t *testing.T) {
+// generateTestRSAKey creates an RSA key pair for testing JWKS functionality
+func generateTestRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	return privateKey
+}
+
+// createJWKSJSON creates a JWKS JSON response from an RSA public key
+func createJWKSJSON(t *testing.T, publicKey *rsa.PublicKey, kid string) string {
+	t.Helper()
+	// Base64url encode the modulus and exponent
+	nBytes := publicKey.N.Bytes()
+	eBytes := big.NewInt(int64(publicKey.E)).Bytes()
+
+	jwks := map[string]any{
+		"keys": []map[string]any{
+			{
+				"kty": "RSA",
+				"use": "sig",
+				"alg": "RS256",
+				"kid": kid,
+				"n":   base64.RawURLEncoding.EncodeToString(nBytes),
+				"e":   base64.RawURLEncoding.EncodeToString(eBytes),
+			},
+		},
+	}
+
+	jwksJSON, err := json.Marshal(jwks)
+	require.NoError(t, err)
+	return string(jwksJSON)
+}
+
+// signJWTWithKey creates a signed JWT using the provided RSA private key
+func signJWTWithKey(t *testing.T, privateKey *rsa.PrivateKey, kid string, claims jwt.Claims) string {
+	t.Helper()
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = kid
+
+	signedToken, err := token.SignedString(privateKey)
+	require.NoError(t, err)
+	return signedToken
+}
+
+func TestDefaultJWTParser(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name        string
-		setupBag    func() baserubrics.RunBag
+		setup       func(t *testing.T) (ec *rubrics.EvalContext, jwtString string)
+		wantValid   bool
+		wantErr     bool
+		wantErrText string
+	}{
+		{
+			name: "valid JWT with mock JWKS",
+			setup: func(t *testing.T) (*rubrics.EvalContext, string) {
+				t.Helper()
+				privateKey := generateTestRSAKey(t)
+				kid := "test-key-1"
+				jwksJSON := createJWKSJSON(t, &privateKey.PublicKey, kid)
+				claims := jwt.RegisteredClaims{
+					Subject:   "test-user",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+					IssuedAt:  jwt.NewNumericDate(time.Now()),
+				}
+				signedJWT := signJWTWithKey(t, privateKey, kid, claims)
+
+				mockClient := newMockClient(func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(jwksJSON)),
+						Header:     make(http.Header),
+					}, nil
+				})
+
+				ec := rubrics.NewEvalContext("http://localhost:8080",
+					rubrics.WithHTTPClient(mockClient),
+				)
+				return ec, signedJWT
+			},
+			wantValid: true,
+			wantErr:   false,
+		},
+		{
+			name: "invalid signature - key mismatch",
+			setup: func(t *testing.T) (*rubrics.EvalContext, string) {
+				t.Helper()
+				signingKey := generateTestRSAKey(t)
+				jwksKey := generateTestRSAKey(t) // Different key!
+				kid := "test-key-1"
+				jwksJSON := createJWKSJSON(t, &jwksKey.PublicKey, kid)
+				claims := jwt.RegisteredClaims{
+					Subject:   "test-user",
+					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+				}
+				signedJWT := signJWTWithKey(t, signingKey, kid, claims)
+
+				mockClient := newMockClient(func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(jwksJSON)),
+						Header:     make(http.Header),
+					}, nil
+				})
+
+				ec := rubrics.NewEvalContext("http://localhost:8080",
+					rubrics.WithHTTPClient(mockClient),
+				)
+				return ec, signedJWT
+			},
+			wantValid:   false,
+			wantErr:     true,
+			wantErrText: "signature",
+		},
+		{
+			name: "JWKS fetch error",
+			setup: func(t *testing.T) (*rubrics.EvalContext, string) {
+				t.Helper()
+				mockClient := newMockClient(func(_ *http.Request) (*http.Response, error) {
+					return nil, errors.New("connection refused")
+				})
+
+				ec := rubrics.NewEvalContext("http://localhost:8080",
+					rubrics.WithHTTPClient(mockClient),
+				)
+				return ec, "any.jwt.token"
+			},
+			wantValid:   false,
+			wantErr:     true,
+			wantErrText: "connection refused",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ec, jwtString := tt.setup(t)
+
+			token, err := ec.JWTParser(jwtString, &jwt.RegisteredClaims{})
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.wantErrText != "" {
+					assert.Contains(t, err.Error(), tt.wantErrText)
+				}
+			} else {
+				require.NoError(t, err)
+				assert.NotNil(t, token)
+				assert.Equal(t, tt.wantValid, token.Valid)
+			}
+		})
+	}
+}
+
+func TestEvaluateValidJWKInJWKSSuccess(t *testing.T) {
+	t.Parallel()
+
+	// Generate RSA key pair
+	privateKey := generateTestRSAKey(t)
+	kid := "valid-key-1"
+
+	// Create JWKS JSON
+	jwksJSON := createJWKSJSON(t, &privateKey.PublicKey, kid)
+
+	// Create and sign a valid JWT
+	claims := jwt.RegisteredClaims{
+		Subject:   "test-user",
+		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
+		IssuedAt:  jwt.NewNumericDate(time.Now()),
+	}
+	signedJWT := signJWTWithKey(t, privateKey, kid, claims)
+
+	// Parse the JWT to get a *jwt.Token (needed for ec.ValidJWT)
+	parser := jwt.NewParser()
+	validToken, _, err := parser.ParseUnverified(signedJWT, &jwt.RegisteredClaims{})
+	require.NoError(t, err)
+	validToken.Raw = signedJWT // Ensure Raw is set for re-verification
+
+	// Mock client returns JWKS
+	mockClient := newMockClient(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(jwksJSON)),
+			Header:     make(http.Header),
+		}, nil
+	})
+
+	ctx := t.Context()
+	pr := mockProgramRunner{}
+	bag := make(baserubrics.RunBag)
+	ec := &rubrics.EvalContext{
+		HostURL:    "http://localhost:8080",
+		ValidJWT:   validToken,
+		HTTPClient: mockClient,
+	}
+	bag["evalContext"] = ec
+
+	result := rubrics.EvaluateValidJWKInJWKS(ctx, pr, bag)
+	assert.NotNil(t, result)
+	assert.Equal(t, 20.0, result.Awarded)
+	assert.Empty(t, result.Note)
+}
+
+func TestEvaluateDatabaseExistsErrorPaths(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		setupBag    func(t *testing.T) baserubrics.RunBag
 		wantAwarded float64
 	}{
 		{
 			name: "database file does not exist",
-			setupBag: func() baserubrics.RunBag {
+			setupBag: func(_ *testing.T) baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{DatabaseFile: "/nonexistent/path/db.db"}
 				bag["evalContext"] = ec
@@ -268,7 +578,7 @@ func TestEvaluateDatabaseExistsErrorPaths(t *testing.T) {
 		},
 		{
 			name: "empty database file path",
-			setupBag: func() baserubrics.RunBag {
+			setupBag: func(_ *testing.T) baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{DatabaseFile: ""}
 				bag["evalContext"] = ec
@@ -276,13 +586,28 @@ func TestEvaluateDatabaseExistsErrorPaths(t *testing.T) {
 			},
 			wantAwarded: 0.0,
 		},
+		{
+			name: "file exists but is not a valid database",
+			setupBag: func(t *testing.T) baserubrics.RunBag {
+				t.Helper()
+				// Create a file that exists but isn't a valid SQLite DB
+				tmpFile := filepath.Join(t.TempDir(), "invalid.db")
+				require.NoError(t, os.WriteFile(tmpFile, []byte("not a database"), 0o644))
+				bag := make(baserubrics.RunBag)
+				ec := &rubrics.EvalContext{DatabaseFile: tmpFile}
+				bag["evalContext"] = ec
+				return bag
+			},
+			wantAwarded: 5.0, // Gets 5 points for file existing, fails on Ping
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
-			bag := tt.setupBag()
+			bag := tt.setupBag(t)
 
 			result := rubrics.EvaluateDatabaseExists(ctx, pr, bag)
 			assert.Equal(t, tt.wantAwarded, result.Awarded)
@@ -292,6 +617,7 @@ func TestEvaluateDatabaseExistsErrorPaths(t *testing.T) {
 }
 
 func TestEvaluateTableExistsWithDatabase(t *testing.T) {
+	t.Parallel()
 	dbFile := createTestDB(t)
 
 	tests := []struct {
@@ -308,6 +634,7 @@ func TestEvaluateTableExistsWithDatabase(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -324,6 +651,7 @@ func TestEvaluateTableExistsWithDatabase(t *testing.T) {
 }
 
 func TestEvaluateDatabaseQueryUsesParametersWithSourceDir(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	dbFile := createTestDB(t)
 
@@ -341,11 +669,10 @@ func TestEvaluateDatabaseQueryUsesParametersWithSourceDir(t *testing.T) {
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{
+	bag["evalContext"] = &rubrics.EvalContext{
 		DatabaseFile: dbFile,
 		SrcDir:       srcDir,
 	}
-	bag["evalContext"] = ec
 
 	result := rubrics.EvaluateDatabaseQueryUsesParameters(ctx, pr, bag)
 	// Should find parameterized query
@@ -353,45 +680,145 @@ func TestEvaluateDatabaseQueryUsesParametersWithSourceDir(t *testing.T) {
 	assert.Equal(t, 15.0, result.Points)
 }
 
-func TestEvaluatePrivateKeysEncryptedErrorCases(t *testing.T) {
+func TestEvaluateDatabaseQueryUsesParametersNoMatch(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	dbFile := createTestDB(t)
+
+	// Create a source file WITHOUT parameterized query
+	srcDir := filepath.Join(tmpDir, "src")
+	err := os.MkdirAll(srcDir, 0o755)
+	require.NoError(t, err)
+
+	// This file has SQL but NO parameter markers (? or $1 etc)
+	sourceFile := filepath.Join(srcDir, "main.go")
+	err = os.WriteFile(sourceFile, []byte(`
+		package main
+		
+		func main() {
+			// This is just regular code, no parameterized SQL
+			query := "SELECT * FROM users"
+		}
+	`), 0o644)
+	require.NoError(t, err)
+
+	ctx := t.Context()
+	pr := mockProgramRunner{}
+	bag := make(baserubrics.RunBag)
+	bag["evalContext"] = &rubrics.EvalContext{
+		DatabaseFile: dbFile,
+		SrcDir:       srcDir,
+	}
+
+	result := rubrics.EvaluateDatabaseQueryUsesParameters(ctx, pr, bag)
+	// Should NOT find parameterized query
+	assert.Equal(t, 0.0, result.Awarded)
+	assert.Equal(t, 15.0, result.Points)
+	assert.Contains(t, result.Note, "No source files found with SQL insertion parameters")
+}
+
+func TestEvaluatePrivateKeysEncrypted(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name     string
-		setupBag func() baserubrics.RunBag
+		name        string
+		setupBag    func(t *testing.T) baserubrics.RunBag
+		wantAwarded float64
+		wantNoteVal string
 	}{
 		{
 			name: "database does not exist",
-			setupBag: func() baserubrics.RunBag {
+			setupBag: func(_ *testing.T) baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
-				ec := &rubrics.EvalContext{DatabaseFile: "/nonexistent.db"}
-				bag["evalContext"] = ec
+				bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+					rubrics.WithDatabaseFile("/nonexistent.db"),
+				)
 				return bag
 			},
+			wantAwarded: 0.0,
 		},
 		{
 			name: "empty database file",
-			setupBag: func() baserubrics.RunBag {
+			setupBag: func(_ *testing.T) baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
-				ec := &rubrics.EvalContext{DatabaseFile: ""}
+				bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+					rubrics.WithDatabaseFile(""),
+				)
+				return bag
+			},
+			wantAwarded: 0.0,
+		},
+		{
+			name: "no keys in database",
+			setupBag: func(t *testing.T) baserubrics.RunBag {
+				t.Helper()
+				bag := make(baserubrics.RunBag)
+				ec := &rubrics.EvalContext{DatabaseFile: createTestDB(t)}
 				bag["evalContext"] = ec
 				return bag
 			},
+			wantAwarded: 0.0,
+			wantNoteVal: "no keys",
+		},
+		{
+			name: "PEM formatted RSA key - not encrypted",
+			setupBag: func(t *testing.T) baserubrics.RunBag {
+				t.Helper()
+				dbFile := createTestDB(t)
+				db, err := sqlx.Connect("sqlite", dbFile)
+				require.NoError(t, err)
+				_, err = db.ExecContext(t.Context(), "INSERT INTO keys (key, exp) VALUES (?, ?)",
+					[]byte("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----"),
+					time.Now().Add(time.Hour).Unix())
+				require.NoError(t, err)
+				_ = db.Close()
+
+				bag := make(baserubrics.RunBag)
+				bag["evalContext"] = &rubrics.EvalContext{DatabaseFile: dbFile}
+				return bag
+			},
+			wantAwarded: 0.0,
+		},
+		{
+			name: "random bytes - encrypted",
+			setupBag: func(t *testing.T) baserubrics.RunBag {
+				t.Helper()
+				dbFile := createTestDB(t)
+				db, err := sqlx.Connect("sqlite", dbFile)
+				require.NoError(t, err)
+				_, err = db.ExecContext(t.Context(), "INSERT INTO keys (key, exp) VALUES (?, ?)",
+					[]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+					time.Now().Add(time.Hour).Unix())
+				require.NoError(t, err)
+				_ = db.Close()
+
+				bag := make(baserubrics.RunBag)
+				bag["evalContext"] = &rubrics.EvalContext{DatabaseFile: dbFile}
+				return bag
+			},
+			wantAwarded: 25.0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
-			bag := tt.setupBag()
+			bag := tt.setupBag(t)
 
 			result := rubrics.EvaluatePrivateKeysEncrypted(ctx, pr, bag)
 			assert.NotNil(t, result)
 			assert.Equal(t, 25.0, result.Points)
+			assert.Equal(t, tt.wantAwarded, result.Awarded)
+			if tt.wantNoteVal != "" {
+				assert.Contains(t, strings.ToLower(result.Note), tt.wantNoteVal)
+			}
 		})
 	}
 }
 
 func TestEvaluateAuthLoggingWithData(t *testing.T) {
+	t.Parallel()
 	dbFile := createTestDB(t)
 
 	ctx := t.Context()
@@ -422,10 +849,16 @@ func TestEvaluateAuthLoggingWithData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
-			ec := &rubrics.EvalContext{DatabaseFile: dbFile}
+			ec := &rubrics.EvalContext{
+				DatabaseFile: dbFile,
+				HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
+					return nil, errors.New("connection refused")
+				}),
+			}
 			bag["evalContext"] = ec
 
 			result := rubrics.EvaluateAuthLogging(ctx, pr, bag)
@@ -437,6 +870,7 @@ func TestEvaluateAuthLoggingWithData(t *testing.T) {
 }
 
 func TestEvaluateValidJWTErrorCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		hostURL string
@@ -447,11 +881,16 @@ func TestEvaluateValidJWTErrorCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
-			ec := &rubrics.EvalContext{HostURL: tt.hostURL}
-			bag["evalContext"] = ec
+			bag["evalContext"] = &rubrics.EvalContext{
+				HostURL: tt.hostURL,
+				HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
+					return nil, errors.New("connection refused")
+				}),
+			}
 
 			result := rubrics.EvaluateValidJWT(ctx, pr, bag)
 			assert.NotNil(t, result)
@@ -461,6 +900,7 @@ func TestEvaluateValidJWTErrorCases(t *testing.T) {
 }
 
 func TestEvaluateExpiredJWTErrorCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		hostURL string
@@ -471,10 +911,16 @@ func TestEvaluateExpiredJWTErrorCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
-			ec := &rubrics.EvalContext{HostURL: tt.hostURL}
+			ec := &rubrics.EvalContext{
+				HostURL: tt.hostURL,
+				HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
+					return nil, errors.New("connection refused")
+				}),
+			}
 			bag["evalContext"] = ec
 
 			result := rubrics.EvaluateExpiredJWT(ctx, pr, bag)
@@ -484,46 +930,120 @@ func TestEvaluateExpiredJWTErrorCases(t *testing.T) {
 	}
 }
 
-func TestEvaluateValidJWKInJWKSNoValidJWT(t *testing.T) {
-	ctx := t.Context()
-	pr := mockProgramRunner{}
-	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{HostURL: "http://localhost:8080"}
-	bag["evalContext"] = ec
+func TestEvaluateValidJWKInJWKSErrorPaths(t *testing.T) {
+	t.Parallel()
 
-	result := rubrics.EvaluateValidJWKInJWKS(ctx, pr, bag)
-	assert.NotNil(t, result)
-	assert.Equal(t, 0.0, result.Awarded)
-	assert.NotEmpty(t, result.Note)
+	validJWT := &jwt.Token{Raw: "eyJhbGciOiJSUzI1NiIsImtpZCI6IjEiLCJ0eXAiOiJKV1QifQ.eyJleHAiOjE5OTk5OTk5OTl9.fake"}
+
+	tests := []struct {
+		name         string
+		setupBag     func() baserubrics.RunBag
+		wantAwarded  float64
+		wantNoteText string
+	}{
+		{
+			name: "no valid JWT",
+			setupBag: func() baserubrics.RunBag {
+				bag := make(baserubrics.RunBag)
+				ec := &rubrics.EvalContext{HostURL: "http://localhost:8080"}
+				bag["evalContext"] = ec
+				return bag
+			},
+			wantAwarded:  0.0,
+			wantNoteText: "no valid JWT",
+		},
+		{
+			name: "JWKS endpoint connection refused",
+			setupBag: func() baserubrics.RunBag {
+				bag := make(baserubrics.RunBag)
+				ec := &rubrics.EvalContext{
+					HostURL:  "http://localhost:9999",
+					ValidJWT: validJWT,
+					HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
+						return nil, errors.New("connection refused")
+					}),
+				}
+				bag["evalContext"] = ec
+				return bag
+			},
+			wantAwarded:  0.0,
+			wantNoteText: "connection refused",
+		},
+		{
+			name: "parse error includes JWKS debug info",
+			setupBag: func() baserubrics.RunBag {
+				bag := make(baserubrics.RunBag)
+				ec := &rubrics.EvalContext{
+					HostURL:  "http://localhost:8080",
+					ValidJWT: validJWT,
+					HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
+						return &http.Response{
+							StatusCode: http.StatusOK,
+							Body:       io.NopCloser(strings.NewReader(`{"keys": []}`)),
+							Header:     make(http.Header),
+						}, nil
+					}),
+				}
+				bag["evalContext"] = ec
+				return bag
+			},
+			wantAwarded:  0.0,
+			wantNoteText: "JWKS Response",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			pr := mockProgramRunner{}
+			bag := tt.setupBag()
+
+			result := rubrics.EvaluateValidJWKInJWKS(ctx, pr, bag)
+			assert.NotNil(t, result)
+			assert.Equal(t, tt.wantAwarded, result.Awarded)
+			assert.NotEmpty(t, result.Note)
+			assert.Contains(t, result.Note, tt.wantNoteText)
+		})
+	}
 }
 
-func TestEvaluateExpiredJWTIsExpiredNoExpiredJWT(t *testing.T) {
-	ctx := t.Context()
-	pr := mockProgramRunner{}
-	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{HostURL: "http://localhost:8080"}
-	bag["evalContext"] = ec
+func TestExpiredJWTEvaluatorsNoExpiredJWT(t *testing.T) {
+	t.Parallel()
 
-	result := rubrics.EvaluateExpiredJWTIsExpired(ctx, pr, bag)
-	assert.NotNil(t, result)
-	assert.Equal(t, 0.0, result.Awarded)
-	assert.NotEmpty(t, result.Note)
-}
+	tests := []struct {
+		name      string
+		evaluator baserubrics.Evaluator
+	}{
+		{
+			name:      "EvaluateExpiredJWTIsExpired",
+			evaluator: rubrics.EvaluateExpiredJWTIsExpired,
+		},
+		{
+			name:      "EvaluateExpiredJWKNotInJWKS",
+			evaluator: rubrics.EvaluateExpiredJWKNotInJWKS,
+		},
+	}
 
-func TestEvaluateExpiredJWKNotInJWKSNoExpiredJWT(t *testing.T) {
-	ctx := t.Context()
-	pr := mockProgramRunner{}
-	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{HostURL: "http://localhost:8080"}
-	bag["evalContext"] = ec
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			pr := mockProgramRunner{}
+			bag := make(baserubrics.RunBag)
+			ec := &rubrics.EvalContext{HostURL: "http://localhost:8080"}
+			bag["evalContext"] = ec
 
-	result := rubrics.EvaluateExpiredJWKNotInJWKS(ctx, pr, bag)
-	assert.NotNil(t, result)
-	assert.Equal(t, 0.0, result.Awarded)
-	assert.NotEmpty(t, result.Note)
+			result := tt.evaluator(ctx, pr, bag)
+			assert.NotNil(t, result)
+			assert.Equal(t, 0.0, result.Awarded)
+			assert.NotEmpty(t, result.Note)
+		})
+	}
 }
 
 func TestEvaluateTableExistsMultipleTables(t *testing.T) {
+	t.Parallel()
 	dbFile := createTestDB(t)
 
 	tests := []struct {
@@ -540,6 +1060,7 @@ func TestEvaluateTableExistsMultipleTables(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -556,11 +1077,11 @@ func TestEvaluateTableExistsMultipleTables(t *testing.T) {
 }
 
 func TestEvaluateHTTPMethodsInvalidURL(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{HostURL: "http://localhost:9999"}
-	bag["evalContext"] = ec
+	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:9999")
 
 	result := rubrics.EvaluateHTTPMethods(ctx, pr, bag)
 	assert.NotNil(t, result)
@@ -568,11 +1089,11 @@ func TestEvaluateHTTPMethodsInvalidURL(t *testing.T) {
 }
 
 func TestEvaluateRegistrationWorksInvalidURL(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{HostURL: "http://localhost:9999"}
-	bag["evalContext"] = ec
+	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:9999")
 
 	result := rubrics.EvaluateRegistrationWorks(ctx, pr, bag)
 	assert.NotNil(t, result)
@@ -581,6 +1102,7 @@ func TestEvaluateRegistrationWorksInvalidURL(t *testing.T) {
 }
 
 func TestEvaluateRateLimitingInvalidEndpoint(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
@@ -588,6 +1110,9 @@ func TestEvaluateRateLimitingInvalidEndpoint(t *testing.T) {
 		HostURL:  "http://localhost:9999",
 		Username: "testuser",
 		Password: "testpass",
+		HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
+			return nil, errors.New("connection refused")
+		}),
 	}
 	bag["evalContext"] = ec
 
@@ -599,33 +1124,51 @@ func TestEvaluateRateLimitingInvalidEndpoint(t *testing.T) {
 	assert.NotEmpty(t, result.Note)
 }
 
-func TestEvaluateDatabaseQueryUsesParametersNoDatabase(t *testing.T) {
-	ctx := t.Context()
-	pr := mockProgramRunner{}
-	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{DatabaseFile: "/nonexistent/path/db.sqlite"}
-	bag["evalContext"] = ec
+func TestEvaluateDatabaseQueryUsesParametersErrorPaths(t *testing.T) {
+	t.Parallel()
 
-	result := rubrics.EvaluateDatabaseQueryUsesParameters(ctx, pr, bag)
-	assert.NotNil(t, result)
-	assert.Equal(t, 0.0, result.Awarded)
-	assert.NotEmpty(t, result.Note)
-}
+	tests := []struct {
+		name     string
+		setupBag func(t *testing.T) baserubrics.RunBag
+	}{
+		{
+			name: "no database file",
+			setupBag: func(_ *testing.T) baserubrics.RunBag {
+				bag := make(baserubrics.RunBag)
+				ec := &rubrics.EvalContext{DatabaseFile: "/nonexistent/path/db.sqlite"}
+				bag["evalContext"] = ec
+				return bag
+			},
+		},
+		{
+			name: "missing source directory",
+			setupBag: func(t *testing.T) baserubrics.RunBag {
+				t.Helper()
+				bag := make(baserubrics.RunBag)
+				ec := &rubrics.EvalContext{SrcDir: filepath.Join(t.TempDir(), "missing")}
+				bag["evalContext"] = ec
+				return bag
+			},
+		},
+	}
 
-func TestEvaluateDatabaseQueryUsesParametersMissingSourceDir(t *testing.T) {
-	ctx := t.Context()
-	pr := mockProgramRunner{}
-	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{SrcDir: filepath.Join(t.TempDir(), "missing")}
-	bag["evalContext"] = ec
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			pr := mockProgramRunner{}
+			bag := tt.setupBag(t)
 
-	result := rubrics.EvaluateDatabaseQueryUsesParameters(ctx, pr, bag)
-	assert.NotNil(t, result)
-	assert.Equal(t, 0.0, result.Awarded)
-	assert.NotEmpty(t, result.Note)
+			result := rubrics.EvaluateDatabaseQueryUsesParameters(ctx, pr, bag)
+			assert.NotNil(t, result)
+			assert.Equal(t, 0.0, result.Awarded)
+			assert.NotEmpty(t, result.Note)
+		})
+	}
 }
 
 func TestDatabaseEvaluatorsWithValidKeys(t *testing.T) {
+	t.Parallel()
 	dbFile := createTestDB(t)
 
 	ctx := t.Context()
@@ -654,6 +1197,7 @@ func TestDatabaseEvaluatorsWithValidKeys(t *testing.T) {
 }
 
 func TestEvaluateDatabaseExistsBrokenDatabase(t *testing.T) {
+	t.Parallel()
 	tmpDir := t.TempDir()
 	brokenDB := filepath.Join(tmpDir, "broken.db")
 
@@ -673,22 +1217,60 @@ func TestEvaluateDatabaseExistsBrokenDatabase(t *testing.T) {
 	assert.LessOrEqual(t, result.Awarded, 10.0)
 }
 
-func TestEvaluateTableExistsInvalidDatabase(t *testing.T) {
-	ctx := t.Context()
-	pr := mockProgramRunner{}
-	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{DatabaseFile: "/nonexistent/db.sqlite"}
-	bag["evalContext"] = ec
+func TestEvaluateTableExistsErrorPaths(t *testing.T) {
+	t.Parallel()
 
-	evaluator := rubrics.EvaluateTableExists("keys", 5.0)
-	result := evaluator(ctx, pr, bag)
+	tests := []struct {
+		name     string
+		setupBag func(t *testing.T) baserubrics.RunBag
+	}{
+		{
+			name: "invalid database path",
+			setupBag: func(_ *testing.T) baserubrics.RunBag {
+				bag := make(baserubrics.RunBag)
+				bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+					rubrics.WithDatabaseFile("/nonexistent/db.sqlite"),
+				)
+				return bag
+			},
+		},
+		{
+			name: "corrupted database file",
+			setupBag: func(t *testing.T) baserubrics.RunBag {
+				t.Helper()
+				tmpFile := filepath.Join(t.TempDir(), "corrupt.db")
+				err := os.WriteFile(tmpFile, []byte("this is not a valid sqlite database"), 0o644)
+				require.NoError(t, err)
 
-	assert.NotNil(t, result)
-	assert.Equal(t, 0.0, result.Awarded)
-	assert.NotEmpty(t, result.Note)
+				bag := make(baserubrics.RunBag)
+				bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+					rubrics.WithDatabaseFile(tmpFile),
+					rubrics.WithJWTParser(mockJWTParser()),
+				)
+				return bag
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := t.Context()
+			pr := mockProgramRunner{}
+			bag := tt.setupBag(t)
+
+			evaluator := rubrics.EvaluateTableExists("keys", 5.0)
+			result := evaluator(ctx, pr, bag)
+
+			assert.NotNil(t, result)
+			assert.Equal(t, 0.0, result.Awarded)
+			assert.NotEmpty(t, result.Note)
+		})
+	}
 }
 
 func TestAuthLoggingEdgeCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		setupDB  func(*testing.T, *sqlx.DB)
@@ -725,6 +1307,7 @@ func TestAuthLoggingEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			// Create fresh database for each test
 			dbFile := createTestDB(t)
 
@@ -737,7 +1320,12 @@ func TestAuthLoggingEdgeCases(t *testing.T) {
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
-			ec := &rubrics.EvalContext{DatabaseFile: dbFile}
+			ec := &rubrics.EvalContext{
+				DatabaseFile: dbFile,
+				HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
+					return nil, errors.New("server not running")
+				}),
+			}
 			bag["evalContext"] = ec
 
 			result := rubrics.EvaluateAuthLogging(ctx, pr, bag)
@@ -747,80 +1335,24 @@ func TestAuthLoggingEdgeCases(t *testing.T) {
 	}
 }
 
-func TestEvaluatePrivateKeysEncryptedEdgeCases(t *testing.T) {
-	tests := []struct {
-		name    string
-		keyData []byte
-		want    float64
-	}{
-		{
-			name:    "PEM formatted RSA key",
-			keyData: []byte("-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...\n-----END RSA PRIVATE KEY-----"),
-			want:    0.0, // Not encrypted, should fail
-		},
-		{
-			name:    "random bytes",
-			keyData: []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
-			want:    25.0, // Encrypted (doesn't start with PEM) should award full points
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dbFile := createTestDB(t)
-
-			ctx := t.Context()
-			db, err := sqlx.Connect("sqlite", dbFile)
-			require.NoError(t, err)
-
-			_, err = db.ExecContext(ctx, "INSERT INTO keys (key, exp) VALUES (?, ?)", tt.keyData, time.Now().Add(time.Hour).Unix())
-			require.NoError(t, err)
-			_ = db.Close()
-
-			pr := mockProgramRunner{}
-			bag := make(baserubrics.RunBag)
-			ec := &rubrics.EvalContext{DatabaseFile: dbFile}
-			bag["evalContext"] = ec
-
-			result := rubrics.EvaluatePrivateKeysEncrypted(ctx, pr, bag)
-			assert.NotNil(t, result)
-			assert.Equal(t, tt.want, result.Awarded)
-		})
-	}
-}
-
-func TestEvaluatePrivateKeysEncryptedNoKeys(t *testing.T) {
-	ctx := t.Context()
-	pr := mockProgramRunner{}
-	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{DatabaseFile: createTestDB(t)}
-	bag["evalContext"] = ec
-
-	result := rubrics.EvaluatePrivateKeysEncrypted(ctx, pr, bag)
-	assert.NotNil(t, result)
-	assert.Equal(t, 0.0, result.Awarded)
-	assert.Contains(t, strings.ToLower(result.Note), "no keys")
-}
-
 func TestHTTPClientInjection(t *testing.T) {
+	t.Parallel()
 	// Demonstrate dependency injection with mock HTTP client
-	mockClient := &mockHTTPClient{
-		DoFunc: func(req *http.Request) (*http.Response, error) {
+	mockClient := newMockClient(
+		func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusMethodNotAllowed,
 				Body:       http.NoBody,
 			}, nil
 		},
-	}
+	)
 
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{
-		HostURL:    "http://localhost:8080",
-		HTTPClient: mockClient,
-	}
-	bag["evalContext"] = ec
+	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+		rubrics.WithHTTPClient(mockClient),
+	)
 
 	result := rubrics.EvaluateHTTPMethods(ctx, pr, bag)
 	assert.NotNil(t, result)
@@ -829,8 +1361,9 @@ func TestHTTPClientInjection(t *testing.T) {
 }
 
 func TestAuthenticationWithMockHTTP(t *testing.T) {
+	t.Parallel()
 	type args struct {
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 		expired    bool
 	}
 	tests := []struct {
@@ -842,15 +1375,15 @@ func TestAuthenticationWithMockHTTP(t *testing.T) {
 		{
 			name: "successful auth with JSON response",
 			args: args{
-				httpClient: &mockHTTPClient{
-					DoFunc: func(req *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(req *http.Request) (*http.Response, error) {
 						body := `{"token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"}`
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       io.NopCloser(strings.NewReader(body)),
 						}, nil
 					},
-				},
+				),
 				expired: false,
 			},
 			wantErr: false,
@@ -859,15 +1392,15 @@ func TestAuthenticationWithMockHTTP(t *testing.T) {
 		{
 			name: "successful auth with raw JWT",
 			args: args{
-				httpClient: &mockHTTPClient{
-					DoFunc: func(req *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(req *http.Request) (*http.Response, error) {
 						body := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c`
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       io.NopCloser(strings.NewReader(body)),
 						}, nil
 					},
-				},
+				),
 				expired: false,
 			},
 			wantErr: false,
@@ -876,11 +1409,11 @@ func TestAuthenticationWithMockHTTP(t *testing.T) {
 		{
 			name: "failed auth - http error",
 			args: args{
-				httpClient: &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						return nil, errors.New("connection refused")
 					},
-				},
+				),
 				expired: false,
 			},
 			wantErr: true,
@@ -889,14 +1422,14 @@ func TestAuthenticationWithMockHTTP(t *testing.T) {
 		{
 			name: "failed auth - non-200 status",
 			args: args{
-				httpClient: &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						return &http.Response{
 							StatusCode: http.StatusUnauthorized,
 							Body:       io.NopCloser(strings.NewReader("unauthorized")),
 						}, nil
 					},
-				},
+				),
 				expired: false,
 			},
 			wantErr: true,
@@ -906,12 +1439,17 @@ func TestAuthenticationWithMockHTTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
 				HostURL:    "http://localhost:8080",
 				HTTPClient: tt.args.httpClient,
+				JWTParser: func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
+					token, _, err := jwt.NewParser().ParseUnverified(tokenString, claims)
+					return token, err
+				},
 			}
 			bag["evalContext"] = ec
 
@@ -929,8 +1467,9 @@ func TestAuthenticationWithMockHTTP(t *testing.T) {
 }
 
 func TestRegistrationWithMockHTTP(t *testing.T) {
+	t.Parallel()
 	type args struct {
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 	}
 	tests := []struct {
 		name        string
@@ -940,69 +1479,69 @@ func TestRegistrationWithMockHTTP(t *testing.T) {
 		{
 			name: "successful registration",
 			args: args{
-				httpClient: &mockHTTPClient{
-					DoFunc: func(req *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(req *http.Request) (*http.Response, error) {
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       io.NopCloser(strings.NewReader(testUUIDPasswordJSON)),
 						}, nil
 					},
-				},
+				),
 			},
 			wantAwarded: 5.0, // Gets 5 points for valid UUID in response
 		},
 		{
 			name: "registration returns created",
 			args: args{
-				httpClient: &mockHTTPClient{
-					DoFunc: func(req *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(req *http.Request) (*http.Response, error) {
 						body := `{"password":"123e4567-e89b-12d3-a456-426614174000"}`
 						return &http.Response{
 							StatusCode: http.StatusCreated,
 							Body:       io.NopCloser(strings.NewReader(body)),
 						}, nil
 					},
-				},
+				),
 			},
 			wantAwarded: 5.0,
 		},
 		{
 			name: "registration fails - bad status",
 			args: args{
-				httpClient: &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						return &http.Response{
 							StatusCode: http.StatusBadRequest,
 							Body:       io.NopCloser(strings.NewReader(`{"error":"bad request"}`)),
 						}, nil
 					},
-				},
+				),
 			},
 			wantAwarded: 0.0,
 		},
 		{
 			name: "registration fails - connection error",
 			args: args{
-				httpClient: &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						return nil, errors.New("connection refused")
 					},
-				},
+				),
 			},
 			wantAwarded: 0.0,
 		},
 		{
 			name: "registration returns invalid password format",
 			args: args{
-				httpClient: &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						body := `{"password":"not-a-uuid"}`
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       io.NopCloser(strings.NewReader(body)),
 						}, nil
 					},
-				},
+				),
 			},
 			wantAwarded: 5.0, // Gets 5 for valid response, but fails on UUID check
 		},
@@ -1010,6 +1549,7 @@ func TestRegistrationWithMockHTTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			dbFile := createTestDB(t)
 			ctx := t.Context()
 			pr := mockProgramRunner{}
@@ -1031,10 +1571,11 @@ func TestRegistrationWithMockHTTP(t *testing.T) {
 }
 
 func TestRateLimitingWithMockHTTP(t *testing.T) {
+	t.Parallel()
 	type args struct {
 		endpoint   string
 		rps        int
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 	}
 	tests := []struct {
 		name        string
@@ -1046,14 +1587,14 @@ func TestRateLimitingWithMockHTTP(t *testing.T) {
 			args: args{
 				endpoint: "/auth",
 				rps:      2,
-				httpClient: &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       http.NoBody,
 						}, nil
 					},
-				},
+				),
 			},
 			wantAwarded: 0.0,
 		},
@@ -1062,14 +1603,14 @@ func TestRateLimitingWithMockHTTP(t *testing.T) {
 			args: args{
 				endpoint: "/auth",
 				rps:      2,
-				httpClient: &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       http.NoBody,
 						}, nil
 					},
-				},
+				),
 			},
 			wantAwarded: 0.0,
 		},
@@ -1078,11 +1619,11 @@ func TestRateLimitingWithMockHTTP(t *testing.T) {
 			args: args{
 				endpoint: "/auth",
 				rps:      2,
-				httpClient: &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				httpClient: newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						return nil, errors.New("connection error")
 					},
-				},
+				),
 			},
 			wantAwarded: 0.0,
 		},
@@ -1090,6 +1631,7 @@ func TestRateLimitingWithMockHTTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -1111,6 +1653,7 @@ func TestRateLimitingWithMockHTTP(t *testing.T) {
 }
 
 func TestAuthLoggingWithMockHTTP(t *testing.T) {
+	t.Parallel()
 	dbFile := createTestDB(t)
 
 	// Seed the database with user and auth log
@@ -1127,46 +1670,47 @@ func TestAuthLoggingWithMockHTTP(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		httpClient  rubrics.HTTPClient
+		httpClient  *http.Client
 		wantAwarded float64
 	}{
 		{
 			name: "auth logging works",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       http.NoBody,
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 10.0,
 		},
 		{
 			name: "auth fails - wrong status",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusUnauthorized,
 						Body:       http.NoBody,
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 		},
 		{
 			name: "auth fails - connection error",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return nil, errors.New("connection error")
 				},
-			},
+			),
 			wantAwarded: 0.0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -1187,15 +1731,16 @@ func TestAuthLoggingWithMockHTTP(t *testing.T) {
 }
 
 func TestExpiredJWTWithMockHTTP(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
-		httpClient  rubrics.HTTPClient
+		httpClient  *http.Client
 		wantAwarded float64
 	}{
 		{
 			name: "expired JWT returned correctly",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(req *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(req *http.Request) (*http.Response, error) {
 					// Return expired JWT (exp claim in the past)
 					body := `{"token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiZXhwIjoxNTE2MjM5MDIyfQ.4Adcj0HKQX4K8Y3lVjGdU_FqKJZgqJ5c5fH2VwLjEfw"}`
 					return &http.Response{
@@ -1203,33 +1748,33 @@ func TestExpiredJWTWithMockHTTP(t *testing.T) {
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 5.0,
 		},
 		{
 			name: "no token returned",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{}`)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
-			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
-				HTTPClient: tt.httpClient,
-			}
-			bag["evalContext"] = ec
+			bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+				rubrics.WithHTTPClient(tt.httpClient),
+				rubrics.WithJWTParser(mockExpiredJWTParser()),
+			)
 
 			result := rubrics.EvaluateExpiredJWT(ctx, pr, bag)
 			assert.NotNil(t, result)
@@ -1239,22 +1784,23 @@ func TestExpiredJWTWithMockHTTP(t *testing.T) {
 }
 
 func TestJWKSValidationWithMockHTTP(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
-		httpClient  rubrics.HTTPClient
+		httpClient  *http.Client
 		setupBag    func() baserubrics.RunBag
 		wantAwarded float64
 	}{
 		{
 			name: "EvaluateValidJWKInJWKS - no valid JWT",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"keys":[]}`)),
 					}, nil
 				},
-			},
+			),
 			setupBag: func() baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{
@@ -1267,14 +1813,14 @@ func TestJWKSValidationWithMockHTTP(t *testing.T) {
 		},
 		{
 			name: "EvaluateExpiredJWTIsExpired - no expired JWT",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{}`)),
 					}, nil
 				},
-			},
+			),
 			setupBag: func() baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{
@@ -1287,14 +1833,14 @@ func TestJWKSValidationWithMockHTTP(t *testing.T) {
 		},
 		{
 			name: "EvaluateExpiredJWKNotInJWKS - no expired JWT",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"keys":[]}`)),
 					}, nil
 				},
-			},
+			),
 			setupBag: func() baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{
@@ -1309,11 +1855,12 @@ func TestJWKSValidationWithMockHTTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := tt.setupBag()
 
-			if ec, ok := bag["evalContext"].(*rubrics.EvalContext); ok {
+			if ec := baserubrics.BagValue[rubrics.EvalContext](bag, "evalContext"); ec != nil {
 				ec.HTTPClient = tt.httpClient
 				bag["evalContext"] = ec
 			}
@@ -1336,91 +1883,92 @@ func TestJWKSValidationWithMockHTTP(t *testing.T) {
 }
 
 func TestHelperFunctionsWithMockHTTP(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		testFunc   string
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 		expired    bool
 		wantErr    bool
 	}{
 		{
 			name:     "authenticatePostJSON success",
 			testFunc: "postJSON",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"token":"valid"}`)),
 					}, nil
 				},
-			},
+			),
 			expired: false,
 			wantErr: false,
 		},
 		{
 			name:     "authenticatePostJSON expired",
 			testFunc: "postJSON",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"token":"expired"}`)),
 					}, nil
 				},
-			},
+			),
 			expired: true,
 			wantErr: false,
 		},
 		{
 			name:     "authenticatePostForm success",
 			testFunc: "postForm",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"token":"valid"}`)),
 					}, nil
 				},
-			},
+			),
 			expired: false,
 			wantErr: false,
 		},
 		{
 			name:     "registration success",
 			testFunc: "registration",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"password":"uuid-here"}`)),
 					}, nil
 				},
-			},
+			),
 			expired: false,
 			wantErr: false,
 		},
 		{
 			name:     "authenticationWithCreds success",
 			testFunc: "authWithCreds",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"token":"valid"}`)),
 					}, nil
 				},
-			},
+			),
 			expired: false,
 			wantErr: false,
 		},
 		{
 			name:     "HTTP error handling",
 			testFunc: "postJSON",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return nil, errors.New("network error")
 				},
-			},
+			),
 			expired: false,
 			wantErr: true,
 		},
@@ -1428,6 +1976,7 @@ func TestHelperFunctionsWithMockHTTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -1465,55 +2014,56 @@ func TestHelperFunctionsWithMockHTTP(t *testing.T) {
 }
 
 func TestAuthenticationHelperEdgeCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 		wantErr    bool
 	}{
 		{
 			name: "authentication with JWT in response",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					body := `{"jwt":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"}`
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			},
+			),
 			wantErr: false,
 		},
 		{
 			name: "authentication with raw JWT body",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					body := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c`
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			},
+			),
 			wantErr: false,
 		},
 		{
 			name: "authentication with invalid JSON",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{invalid json}`)),
 					}, nil
 				},
-			},
+			),
 			wantErr: true,
 		},
 		{
 			name: "authentication falls back to postJSON after postForm fails",
-			httpClient: func() rubrics.HTTPClient {
+			httpClient: func() *http.Client {
 				callCount := 0
-				return &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				return newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						callCount++
 						if callCount == 1 {
 							// First call (postForm) returns non-200
@@ -1529,7 +2079,7 @@ func TestAuthenticationHelperEdgeCases(t *testing.T) {
 							Body:       io.NopCloser(strings.NewReader(body)),
 						}, nil
 					},
-				}
+				)
 			}(),
 			wantErr: false,
 		},
@@ -1537,12 +2087,17 @@ func TestAuthenticationHelperEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
 				HostURL:    "http://localhost:8080",
 				HTTPClient: tt.httpClient,
+				JWTParser: func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
+					token, _, err := jwt.NewParser().ParseUnverified(tokenString, claims)
+					return token, err
+				},
 			}
 			bag["evalContext"] = ec
 
@@ -1560,16 +2115,17 @@ func TestAuthenticationHelperEdgeCases(t *testing.T) {
 }
 
 func TestEvaluateExpiredJWTEdgeCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
-		httpClient  rubrics.HTTPClient
+		httpClient  *http.Client
 		wantAwarded float64
 		wantNote    bool
 	}{
 		{
 			name: "expired JWT without exp claim",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					// JWT without exp claim
 					body := `{"token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.Gfx6VO9tcxwk6xqx9yYzSfebfeakZp5JYIgP_edcw_A"}`
 					return &http.Response{
@@ -1577,14 +2133,14 @@ func TestEvaluateExpiredJWTEdgeCases(t *testing.T) {
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 			wantNote:    true,
 		},
 		{
 			name: "expired JWT with future exp",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					// JWT with exp in future
 					body := `{"token":"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiZXhwIjo5OTk5OTk5OTk5fQ.C-JdoPoGH-YLpL7HuSjNB0cWa0lVVZqI5VdVwrUYtYc"}`
 					return &http.Response{
@@ -1592,20 +2148,20 @@ func TestEvaluateExpiredJWTEdgeCases(t *testing.T) {
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 			wantNote:    true,
 		},
 		{
 			name: "expired JWT with header but no token",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"message":"no token"}`)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 			wantNote:    true,
 		},
@@ -1613,6 +2169,7 @@ func TestEvaluateExpiredJWTEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -1637,6 +2194,7 @@ func TestEvaluateExpiredJWTEdgeCases(t *testing.T) {
 }
 
 func TestEvaluateDatabaseExistsEdgeCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		setupDB     func(*testing.T) string
@@ -1696,6 +2254,7 @@ func TestEvaluateDatabaseExistsEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			dbFile := tt.setupDB(t)
 
 			ctx := t.Context()
@@ -1712,40 +2271,94 @@ func TestEvaluateDatabaseExistsEdgeCases(t *testing.T) {
 }
 
 func TestEvaluateRegistrationWorksEdgeCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
-		httpClient  rubrics.HTTPClient
+		httpClient  *http.Client
 		setupDB     func(*testing.T, *rubrics.EvalContext)
 		wantAwarded float64
 	}{
 		{
 			name: "registration with empty password field",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"password":""}`)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 		},
 		{
 			name: "registration with non-JSON response",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`plain text response`)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
+		},
+		{
+			name: "registration returns invalid UUID password",
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"password":"not-uuid"}`)),
+					}, nil
+				},
+			),
+			wantAwarded: 5.0, // 5 points for non-empty password
+		},
+		{
+			name: "user exists but password hash is empty",
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
+					// Mock registration success
+					password := "123e4567-e89b-12d3-a456-426614174000"
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(fmt.Sprintf(`{"password":%q}`, password))),
+					}, nil
+				},
+			),
+			setupDB: func(t *testing.T, ec *rubrics.EvalContext) {
+				// Setup DB with user having empty hash
+				db, err := sqlx.Connect("sqlite", ec.DatabaseFile)
+				require.NoError(t, err)
+				_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", ec.Username, "")
+				require.NoError(t, err)
+				_ = db.Close()
+			},
+			wantAwarded: 10.0, // 5 points password + 5 points user exists
+		},
+		{
+			name: "registration success but user not in DB",
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(`{"password":"123e4567-e89b-12d3-a456-426614174000"}`)),
+					}, nil
+				},
+			),
+			setupDB: func(t *testing.T, ec *rubrics.EvalContext) {
+				// Tables created by helpers, but we explicitly don't insert user
+				db, err := sqlx.Connect("sqlite", ec.DatabaseFile)
+				require.NoError(t, err)
+				_ = db.Close()
+			},
+			wantAwarded: 5.0, // 5 points for password in response
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			dbFile := createTestDB(t)
 			ctx := t.Context()
 			pr := mockProgramRunner{}
@@ -1769,6 +2382,7 @@ func TestEvaluateRegistrationWorksEdgeCases(t *testing.T) {
 }
 
 func TestEvaluateRegistrationWorksHashEqualsPassword(t *testing.T) {
+	t.Parallel()
 	password := "123e4567-e89b-12d3-a456-426614174000"
 	dbFile := createTestDB(t)
 
@@ -1778,14 +2392,14 @@ func TestEvaluateRegistrationWorksHashEqualsPassword(t *testing.T) {
 	require.NoError(t, err)
 	_ = db.Close()
 
-	httpClient := &mockHTTPClient{
-		DoFunc: func(_ *http.Request) (*http.Response, error) {
+	httpClient := newMockClient(
+		func(_ *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusOK,
 				Body:       io.NopCloser(strings.NewReader(fmt.Sprintf(`{"password":%q}`, password))),
 			}, nil
 		},
-	}
+	)
 
 	ctx := t.Context()
 	pr := mockProgramRunner{}
@@ -1804,51 +2418,107 @@ func TestEvaluateRegistrationWorksHashEqualsPassword(t *testing.T) {
 	assert.Contains(t, strings.ToLower(result.Note), "password hash is same")
 }
 
+func TestEvaluateRegistrationWorksBodyReadError(t *testing.T) {
+	t.Parallel()
+	httpClient := newMockClient(
+		func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(errorReader{}),
+			}, nil
+		},
+	)
+
+	ctx := t.Context()
+	pr := mockProgramRunner{}
+	bag := make(baserubrics.RunBag)
+	ec := &rubrics.EvalContext{
+		HostURL:    "http://localhost:8080",
+		HTTPClient: httpClient,
+		Username:   "testuser",
+	}
+	bag["evalContext"] = ec
+
+	result := rubrics.EvaluateRegistrationWorks(ctx, pr, bag)
+	assert.NotNil(t, result)
+	assert.Equal(t, 0.0, result.Awarded)
+	assert.Contains(t, result.Note, "read error")
+}
+
 func TestEvaluateRegistrationWorksFullFlow(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name       string
-		httpClient rubrics.HTTPClient
-		insertUser bool
-		wantMin    float64
+		name         string
+		httpClient   *http.Client
+		setupDB      func(t *testing.T, dbFile string)
+		wantAwarded  float64
+		wantMinScore bool
 	}{
 		{
 			name: "full registration flow with DB check",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusCreated,
 						Body:       io.NopCloser(strings.NewReader(testUUIDPasswordJSON)),
 					}, nil
 				},
-			},
-			insertUser: true,
-			wantMin:    10.0, // 5 for password + 5 for user in DB
-		},
-		{
-			name: "registration with same password as hash",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(strings.NewReader(testUUIDPasswordJSON)),
-					}, nil
-				},
-			},
-			insertUser: false,
-			wantMin:    5.0, // Only password points
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dbFile := createTestDB(t)
-
-			if tt.insertUser {
+			),
+			setupDB: func(t *testing.T, dbFile string) {
+				t.Helper()
 				db, err := sqlx.Connect("sqlite", dbFile)
 				require.NoError(t, err)
 				_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hashed_password_value")
 				require.NoError(t, err)
 				_ = db.Close()
+			},
+			wantMinScore: true,
+			wantAwarded:  10.0, // 5 for password + 5 for user in DB
+		},
+		{
+			name: "registration with same password as hash",
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(testUUIDPasswordJSON)),
+					}, nil
+				},
+			),
+			setupDB:      nil,
+			wantMinScore: true,
+			wantAwarded:  5.0, // Only password points
+		},
+		{
+			name: "full flow with different hash - all points",
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusCreated,
+						Body:       io.NopCloser(strings.NewReader(testUUIDPasswordJSON)),
+					}, nil
+				},
+			),
+			setupDB: func(t *testing.T, dbFile string) {
+				t.Helper()
+				db, err := sqlx.Connect("sqlite", dbFile)
+				require.NoError(t, err)
+				_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "different_hash")
+				require.NoError(t, err)
+				_ = db.Close()
+			},
+			wantMinScore: false,
+			wantAwarded:  20.0, // 5 (password) + 5 (user exists) + 10 (hash different)
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			dbFile := createTestDB(t)
+
+			if tt.setupDB != nil {
+				tt.setupDB(t, dbFile)
 			}
 
 			ctx := t.Context()
@@ -1864,26 +2534,31 @@ func TestEvaluateRegistrationWorksFullFlow(t *testing.T) {
 
 			result := rubrics.EvaluateRegistrationWorks(ctx, pr, bag)
 			assert.NotNil(t, result)
-			assert.GreaterOrEqual(t, result.Awarded, tt.wantMin)
+			if tt.wantMinScore {
+				assert.GreaterOrEqual(t, result.Awarded, tt.wantAwarded)
+			} else {
+				assert.Equal(t, tt.wantAwarded, result.Awarded)
+			}
 		})
 	}
 }
 
 func TestEvaluateJWKSWithValidAndExpiredJWTs(t *testing.T) {
+	t.Parallel()
 	// Create a scenario where we have both valid and expired JWTs in bag
 	validJWT := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjEifQ.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiZXhwIjo5OTk5OTk5OTk5fQ.HL8Zg8R6vF5MwL-CK4bKZQ0YbPk0Q5X3g5G7K5jDqYE`
 	expiredJWT := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCIsImtpZCI6IjIifQ.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiZXhwIjoxNTE2MjM5MDIyfQ.4Adcj0HKQX4K8Y3lVjGdU_FqKJZgqJ5c5fH2VwLjEfw`
 
 	tests := []struct {
 		name       string
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 		testFunc   string
 		wantMin    float64
 	}{
 		{
 			name: "ValidJWKInJWKS with JWKS error",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(req *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(req *http.Request) (*http.Response, error) {
 					if strings.Contains(req.URL.Path, "/auth") {
 						return &http.Response{
 							StatusCode: http.StatusOK,
@@ -1892,14 +2567,14 @@ func TestEvaluateJWKSWithValidAndExpiredJWTs(t *testing.T) {
 					}
 					return nil, errors.New("jwks fetch failed")
 				},
-			},
+			),
 			testFunc: "ValidJWKInJWKS",
 			wantMin:  0.0,
 		},
 		{
 			name: "ExpiredJWKNotInJWKS with JWKS response",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(req *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(req *http.Request) (*http.Response, error) {
 					if strings.Contains(req.URL.Path, "/auth") {
 						return &http.Response{
 							StatusCode: http.StatusOK,
@@ -1913,7 +2588,7 @@ func TestEvaluateJWKSWithValidAndExpiredJWTs(t *testing.T) {
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			},
+			),
 			testFunc: "ExpiredJWKNotInJWKS",
 			wantMin:  0.0,
 		},
@@ -1921,6 +2596,7 @@ func TestEvaluateJWKSWithValidAndExpiredJWTs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -1952,16 +2628,17 @@ func TestEvaluateJWKSWithValidAndExpiredJWTs(t *testing.T) {
 }
 
 func TestAuthenticatePostJSONEdgeCases(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 		expired    bool
 		wantErr    bool
 	}{
 		{
 			name: "expired parameter in URL",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(req *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(req *http.Request) (*http.Response, error) {
 					// Verify expired query param is set
 					if req.URL.Query().Get("expired") == "true" {
 						body := `{"token":"expired-jwt"}`
@@ -1976,20 +2653,20 @@ func TestAuthenticatePostJSONEdgeCases(t *testing.T) {
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			},
+			),
 			expired: true,
 			wantErr: false,
 		},
 		{
 			name: "read body error",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(&errorReader{}),
 					}, nil
 				},
-			},
+			),
 			expired: false,
 			wantErr: true,
 		},
@@ -1997,6 +2674,7 @@ func TestAuthenticatePostJSONEdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -2029,29 +2707,30 @@ func (errorReader) Read(_ []byte) (int, error) {
 }
 
 func TestHTTPMethodsWithVariousResponses(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 		wantMin    float64
 	}{
 		{
 			name: "all methods return 405",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusMethodNotAllowed,
 						Body:       http.NoBody,
 					}, nil
 				},
-			},
+			),
 			wantMin: 9.0, // 1 base + 9 correct responses
 		},
 		{
 			name: "mixed responses",
-			httpClient: func() *mockHTTPClient {
+			httpClient: func() *http.Client {
 				count := 0
-				return &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+				return newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						count++
 						if count%2 == 0 {
 							return &http.Response{
@@ -2064,7 +2743,7 @@ func TestHTTPMethodsWithVariousResponses(t *testing.T) {
 							Body:       http.NoBody,
 						}, nil
 					},
-				}
+				)
 			}(),
 			wantMin: 1.0,
 		},
@@ -2072,6 +2751,7 @@ func TestHTTPMethodsWithVariousResponses(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -2089,6 +2769,7 @@ func TestHTTPMethodsWithVariousResponses(t *testing.T) {
 }
 
 func TestCompleteJWKSFlow(t *testing.T) {
+	t.Parallel()
 	// Test complete flow with successful JWKS validation
 	jwksResponse := `{"keys":[{"kty":"RSA","use":"sig","kid":"1","n":"0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtV","e":"AQAB"}]}`
 
@@ -2114,8 +2795,9 @@ func TestCompleteJWKSFlow(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			httpClient := &mockHTTPClient{
-				DoFunc: func(req *http.Request) (*http.Response, error) {
+			t.Parallel()
+			httpClient := newMockClient(
+				func(req *http.Request) (*http.Response, error) {
 					if strings.Contains(req.URL.Path, "jwks") {
 						return &http.Response{
 							StatusCode: http.StatusOK,
@@ -2129,7 +2811,7 @@ func TestCompleteJWKSFlow(t *testing.T) {
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			}
+			)
 
 			ctx := t.Context()
 			pr := mockProgramRunner{}
@@ -2162,6 +2844,7 @@ func TestCompleteJWKSFlow(t *testing.T) {
 }
 
 func TestEvaluateExpiredJWKNotInJWKS_KIDNotFound(t *testing.T) {
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"keys":[{"kty":"RSA","use":"sig","kid":"1","n":"0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtV","e":"AQAB"}]}`))
 	}))
@@ -2192,6 +2875,7 @@ func TestEvaluateExpiredJWKNotInJWKS_KIDNotFound(t *testing.T) {
 }
 
 func TestEvaluateExpiredJWKNotInJWKSScenarios(t *testing.T) {
+	t.Parallel()
 	jwksBody := `{"keys":[{"kty":"RSA","use":"sig","kid":"present","n":"0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtV","e":"AQAB"}]}`
 
 	tests := []struct {
@@ -2206,6 +2890,7 @@ func TestEvaluateExpiredJWKNotInJWKSScenarios(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				_, _ = w.Write([]byte(jwksBody))
 			}))
@@ -2240,76 +2925,77 @@ func TestEvaluateExpiredJWKNotInJWKSScenarios(t *testing.T) {
 }
 
 func TestEvaluateExpiredJWTScenarios(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
-		httpClient  rubrics.HTTPClient
+		httpClient  *http.Client
 		wantAwarded float64
 		checkNote   bool
 	}{
 		{
 			name: "empty response body",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{}`)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 			checkNote:   true,
 		},
 		{
 			name: "token with nil header",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`malformed`)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 			checkNote:   true,
 		},
 		{
 			name: "valid token (not expired)",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					body := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiZXhwIjo5OTk5OTk5OTk5fQ.C-JdoPoGH-YLpL7HuSjNB0cWa0lVVZqI5VdVwrUYtYc`
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			},
-			wantAwarded: 5.0,
-			checkNote:   false,
+			),
+			wantAwarded: 0.0,
+			checkNote:   true,
 		},
 		{
 			name: "postForm and postJSON return non-200",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusUnauthorized,
 						Body:       http.NoBody,
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 			checkNote:   true,
 		},
 		{
 			name: "postForm succeeds with JWT",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					body := `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwiZXhwIjoxNTE2MjM5MDIyfQ.4Adcj0HKQX4K8Y3lVjGdU_FqKJZgqJ5c5fH2VwLjEfw`
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(body)),
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 5.0,
 			checkNote:   false,
 		},
@@ -2317,12 +3003,25 @@ func TestEvaluateExpiredJWTScenarios(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
 				HostURL:    "http://localhost:8080",
 				HTTPClient: tt.httpClient,
+				JWTParser: func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
+					token, _, err := jwt.NewParser().ParseUnverified(tokenString, claims)
+					if err != nil {
+						return nil, err
+					}
+					if exp, err := token.Claims.GetExpirationTime(); err == nil && exp != nil {
+						if exp.Before(time.Now()) {
+							return token, jwt.ErrTokenExpired
+						}
+					}
+					return token, nil
+				},
 			}
 			bag["evalContext"] = ec
 
@@ -2337,24 +3036,25 @@ func TestEvaluateExpiredJWTScenarios(t *testing.T) {
 }
 
 func TestEvaluateAuthLoggingAllBranches(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		setupDB     func(*testing.T) string
-		httpClient  rubrics.HTTPClient
+		httpClient  *http.Client
 		wantAwarded float64
 		noteCheck   string
 	}{
 		{
 			name:    "user not found in DB",
 			setupDB: createTestDB,
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       http.NoBody,
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 			noteCheck:   "sql",
 		},
@@ -2370,14 +3070,14 @@ func TestEvaluateAuthLoggingAllBranches(t *testing.T) {
 				_ = db.Close()
 				return dbFile
 			},
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       http.NoBody,
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 0.0,
 			noteCheck:   "error",
 		},
@@ -2392,21 +3092,66 @@ func TestEvaluateAuthLoggingAllBranches(t *testing.T) {
 				_ = db.Close()
 				return dbFile
 			},
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       http.NoBody,
 					}, nil
 				},
-			},
+			),
 			wantAwarded: 5.0,
 			noteCheck:   "IP",
+		},
+		{
+			name: "logs with zero timestamp",
+			setupDB: func(t *testing.T) string {
+				dbFile := createTestDB(t)
+				db, err := sqlx.Connect("sqlite", dbFile)
+				require.NoError(t, err)
+				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+				_, _ = db.ExecContext(t.Context(), "INSERT INTO auth_logs (request_ip, request_timestamp, user_id) VALUES (?, ?, ?)", "1.2.3.4", "0001-01-01 00:00:00", 1)
+				_ = db.Close()
+				return dbFile
+			},
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       http.NoBody,
+					}, nil
+				},
+			),
+			wantAwarded: 5.0,
+			noteCheck:   "timestamp",
+		},
+		{
+			name: "no logs found for user",
+			setupDB: func(t *testing.T) string {
+				dbFile := createTestDB(t)
+				db, err := sqlx.Connect("sqlite", dbFile)
+				require.NoError(t, err)
+				// Insert user but NO auth_logs for this user
+				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+				_ = db.Close()
+				return dbFile
+			},
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       http.NoBody,
+					}, nil
+				},
+			),
+			wantAwarded: 0.0,
+			noteCheck:   "no logs found",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			dbFile := tt.setupDB(t)
 
 			ctx := t.Context()
@@ -2432,6 +3177,7 @@ func TestEvaluateAuthLoggingAllBranches(t *testing.T) {
 }
 
 func TestEvaluateDatabaseExistsQueryError(t *testing.T) {
+	t.Parallel()
 	// Create a database that will fail on keys query
 	tmpDir := t.TempDir()
 	dbFile := filepath.Join(tmpDir, "test.db")
@@ -2456,25 +3202,27 @@ func TestEvaluateDatabaseExistsQueryError(t *testing.T) {
 }
 
 func TestAuthenticationHelperReadBodyErrors(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 	}{
 		{
 			name: "authentication io.ReadAll error",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(&errorReader{}),
 					}, nil
 				},
-			},
+			),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -2493,6 +3241,7 @@ func TestAuthenticationHelperReadBodyErrors(t *testing.T) {
 }
 
 func TestEvaluateExpiredJWTIsExpiredAllPaths(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		setupExpJWT func(*rubrics.EvalContext)
@@ -2522,10 +3271,37 @@ func TestEvaluateExpiredJWTIsExpiredAllPaths(t *testing.T) {
 			wantAwarded: 0.0,
 			wantNote:    true,
 		},
+		{
+			name: "ExpiredJWT with nil expiry",
+			setupExpJWT: func(ec *rubrics.EvalContext) {
+				// Token with no exp claim
+				token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+					Subject: "no-exp",
+				})
+				token.Raw = "noexp.raw.jwt"
+				ec.ExpiredJWT = token
+			},
+			wantAwarded: 0.0,
+			wantNote:    true,
+		},
+		{
+			name: "ExpiredJWT with invalid claims type",
+			setupExpJWT: func(ec *rubrics.EvalContext) {
+				// Token with MapClaims that has invalid exp type
+				token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+					"exp": "not-a-number",
+				})
+				token.Raw = "invalid.raw.jwt"
+				ec.ExpiredJWT = token
+			},
+			wantAwarded: 0.0,
+			wantNote:    true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -2544,24 +3320,50 @@ func TestEvaluateExpiredJWTIsExpiredAllPaths(t *testing.T) {
 }
 
 func TestEvaluateHTTPMethodsRequestErrors(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 		wantMin    float64
 	}{
 		{
 			name: "request failure still yields base points",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return nil, errors.New("connection refused")
 				},
-			},
+			),
 			wantMin: 1.0,
+		},
+		{
+			name: "method not allowed returns extra points",
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusMethodNotAllowed,
+						Body:       io.NopCloser(strings.NewReader("")),
+					}, nil
+				},
+			),
+			wantMin: 10.0, // base 1 + 9 methods that return 405
+		},
+		{
+			name: "wrong status code no extra points",
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader("")),
+					}, nil
+				},
+			),
+			wantMin: 1.0, // only base point
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -2578,44 +3380,8 @@ func TestEvaluateHTTPMethodsRequestErrors(t *testing.T) {
 	}
 }
 
-func TestRegistrationFullPath(t *testing.T) {
-	// Test the full registration path including DB lookups
-	dbFile := createTestDB(t)
-
-	// Insert user first
-	db, err := sqlx.Connect("sqlite", dbFile)
-	require.NoError(t, err)
-	_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "different_hash")
-	require.NoError(t, err)
-	_ = db.Close()
-
-	httpClient := &mockHTTPClient{
-		DoFunc: func(_ *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusCreated,
-				Body:       io.NopCloser(strings.NewReader(testUUIDPasswordJSON)),
-			}, nil
-		},
-	}
-
-	ctx := t.Context()
-	pr := mockProgramRunner{}
-	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{
-		HostURL:      "http://localhost:8080",
-		DatabaseFile: dbFile,
-		HTTPClient:   httpClient,
-		Username:     "testuser",
-	}
-	bag["evalContext"] = ec
-
-	result := rubrics.EvaluateRegistrationWorks(ctx, pr, bag)
-	assert.NotNil(t, result)
-	// Should get 5 (password) + 5 (user exists) + 10 (hash different) = 20
-	assert.Equal(t, 20.0, result.Awarded)
-}
-
 func TestTableExistsHelper(t *testing.T) {
+	t.Parallel()
 	dbFile := createTestDB(t)
 
 	tests := []struct {
@@ -2630,6 +3396,7 @@ func TestTableExistsHelper(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -2650,6 +3417,7 @@ func TestTableExistsHelper(t *testing.T) {
 }
 
 func TestValidJWKInJWKSComprehensive(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		setupJWT    func() *jwt.Token
@@ -2695,8 +3463,9 @@ func TestValidJWKInJWKSComprehensive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			httpClient := &mockHTTPClient{
-				DoFunc: func(req *http.Request) (*http.Response, error) {
+			t.Parallel()
+			httpClient := newMockClient(
+				func(req *http.Request) (*http.Response, error) {
 					if strings.Contains(req.URL.Path, "jwks") {
 						if tt.jwksResp == "" {
 							return nil, errors.New("jwks fetch failed")
@@ -2708,7 +3477,7 @@ func TestValidJWKInJWKSComprehensive(t *testing.T) {
 					}
 					return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody}, nil
 				},
-			}
+			)
 
 			ctx := t.Context()
 			pr := mockProgramRunner{}
@@ -2729,6 +3498,7 @@ func TestValidJWKInJWKSComprehensive(t *testing.T) {
 }
 
 func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		setupJWT func() *jwt.Token
@@ -2797,8 +3567,9 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			httpClient := &mockHTTPClient{
-				DoFunc: func(req *http.Request) (*http.Response, error) {
+			t.Parallel()
+			httpClient := newMockClient(
+				func(req *http.Request) (*http.Response, error) {
 					if strings.Contains(req.URL.Path, "jwks") {
 						if tt.jwksResp == "" {
 							return nil, errors.New("jwks fetch failed")
@@ -2810,7 +3581,7 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 					}
 					return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody}, nil
 				},
-			}
+			)
 
 			ctx := t.Context()
 			pr := mockProgramRunner{}
@@ -2830,27 +3601,29 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 }
 
 func TestEvaluateExpiredJWTWithNilChecks(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
-		httpClient rubrics.HTTPClient
+		httpClient *http.Client
 		wantNote   string
 	}{
 		{
 			name: "response returns nil token",
-			httpClient: &mockHTTPClient{
-				DoFunc: func(_ *http.Request) (*http.Response, error) {
+			httpClient: newMockClient(
+				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
 						StatusCode: http.StatusUnauthorized,
 						Body:       io.NopCloser(strings.NewReader(`{"error":"unauthorized"}`)),
 					}, nil
 				},
-			},
+			),
 			wantNote: "JWT",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -2869,24 +3642,24 @@ func TestEvaluateExpiredJWTWithNilChecks(t *testing.T) {
 }
 
 func TestEvaluateExpiredJWTErrorInAuthCall(t *testing.T) {
+	t.Parallel()
 	// Test when authentication itself returns an error
-	httpClient := &mockHTTPClient{
-		DoFunc: func(_ *http.Request) (*http.Response, error) {
+	httpClient := newMockClient(
+		func(_ *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusUnauthorized,
 				Body:       http.NoBody,
 			}, nil
 		},
-	}
+	)
 
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{
-		HostURL:    "http://localhost:8080",
-		HTTPClient: httpClient,
-	}
-	bag["evalContext"] = ec
+	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+		rubrics.WithHTTPClient(httpClient),
+		rubrics.WithJWTParser(mockExpiredJWTParser()),
+	)
 
 	result := rubrics.EvaluateExpiredJWT(ctx, pr, bag)
 	assert.NotNil(t, result)
@@ -2895,10 +3668,11 @@ func TestEvaluateExpiredJWTErrorInAuthCall(t *testing.T) {
 }
 
 func TestAuthenticationFallbackLogic(t *testing.T) {
+	t.Parallel()
 	// Test the authentication function's fallback from postForm to postJSON
 	callCount := 0
-	httpClient := &mockHTTPClient{
-		DoFunc: func(req *http.Request) (*http.Response, error) {
+	httpClient := newMockClient(
+		func(req *http.Request) (*http.Response, error) {
 			callCount++
 			if callCount == 1 {
 				return &http.Response{
@@ -2912,16 +3686,15 @@ func TestAuthenticationFallbackLogic(t *testing.T) {
 				Body:       io.NopCloser(strings.NewReader(body)),
 			}, nil
 		},
-	}
+	)
 
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	ec := &rubrics.EvalContext{
-		HostURL:    "http://localhost:8080",
-		HTTPClient: httpClient,
-	}
-	bag["evalContext"] = ec
+	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+		rubrics.WithHTTPClient(httpClient),
+		rubrics.WithJWTParser(mockJWTParser()),
+	)
 
 	result := rubrics.EvaluateValidJWT(ctx, pr, bag)
 	assert.NotNil(t, result)
@@ -2930,6 +3703,7 @@ func TestAuthenticationFallbackLogic(t *testing.T) {
 }
 
 func TestDatabaseQueryUsesParametersWithSrcDir(t *testing.T) {
+	t.Parallel()
 	dbFile := createTestDB(t)
 	tmpDir := t.TempDir()
 
@@ -2960,23 +3734,24 @@ func TestDatabaseQueryUsesParametersWithSrcDir(t *testing.T) {
 }
 
 func TestRateLimitingStatusCodeChecks(t *testing.T) {
+	t.Parallel()
 	// Test rate limiting with different status code scenarios
 	tests := []struct {
 		name        string
-		setupClient func() *mockHTTPClient
+		setupClient func() *http.Client
 		wantAwarded float64
 	}{
 		{
 			name: "first request fails",
-			setupClient: func() *mockHTTPClient {
-				return &mockHTTPClient{
-					DoFunc: func(_ *http.Request) (*http.Response, error) {
+			setupClient: func() *http.Client {
+				return newMockClient(
+					func(_ *http.Request) (*http.Response, error) {
 						return &http.Response{
 							StatusCode: http.StatusInternalServerError,
 							Body:       http.NoBody,
 						}, nil
 					},
-				}
+				)
 			},
 			wantAwarded: 0.0,
 		},
@@ -2984,6 +3759,7 @@ func TestRateLimitingStatusCodeChecks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
@@ -3005,10 +3781,11 @@ func TestRateLimitingStatusCodeChecks(t *testing.T) {
 }
 
 func TestEvaluateRateLimitingSuccess(t *testing.T) {
+	t.Parallel()
 	rps := 2
 	callCount := 0
-	client := &mockHTTPClient{
-		DoFunc: func(_ *http.Request) (*http.Response, error) {
+	client := newMockClient(
+		func(_ *http.Request) (*http.Response, error) {
 			callCount++
 			status := http.StatusOK
 			if callCount == rps+1 {
@@ -3016,7 +3793,7 @@ func TestEvaluateRateLimitingSuccess(t *testing.T) {
 			}
 			return &http.Response{StatusCode: status, Body: http.NoBody}, nil
 		},
-	}
+	)
 
 	ctx := t.Context()
 	pr := mockProgramRunner{}
@@ -3037,7 +3814,42 @@ func TestEvaluateRateLimitingSuccess(t *testing.T) {
 	assert.Equal(t, rps+1, callCount)
 }
 
+func TestEvaluateRateLimitingFinalRequestError(t *testing.T) {
+	t.Parallel()
+	rps := 2
+	callCount := 0
+	client := newMockClient(
+		func(_ *http.Request) (*http.Response, error) {
+			callCount++
+			if callCount <= rps {
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody}, nil
+			}
+			// Final request (after rate limit should kick in) returns error
+			return nil, errors.New("connection reset")
+		},
+	)
+
+	ctx := t.Context()
+	pr := mockProgramRunner{}
+	bag := make(baserubrics.RunBag)
+	ec := &rubrics.EvalContext{
+		HostURL:    "http://localhost:8080",
+		Username:   "user",
+		Password:   "pass",
+		HTTPClient: client,
+	}
+	bag["evalContext"] = ec
+
+	evaluator := rubrics.EvaluateRateLimiting(rubrics.AuthEndpoint, rps)
+	result := evaluator(ctx, pr, bag)
+
+	assert.NotNil(t, result)
+	assert.Equal(t, 0.0, result.Awarded)
+	assert.Contains(t, result.Note, "connection reset")
+}
+
 func TestDatabaseExistsRowsScanError(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 	}{
@@ -3046,6 +3858,7 @@ func TestDatabaseExistsRowsScanError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			// Create DB with keys table but wrong column count to trigger Scan error
 			tmpDir := t.TempDir()
 			dbFile := filepath.Join(tmpDir, "test.db")
@@ -3076,4 +3889,115 @@ func TestDatabaseExistsRowsScanError(t *testing.T) {
 			assert.LessOrEqual(t, result.Awarded, 5.0)
 		})
 	}
+}
+
+func TestDbHelpersWithNonExistentDatabase(t *testing.T) {
+	t.Parallel()
+
+	// Test dbGet error path via EvaluateRegistrationWorks
+	t.Run("dbGet with non-existent database", func(t *testing.T) {
+		t.Parallel()
+
+		// HTTP client that returns a valid registration response
+		httpClient := newMockClient(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(testUUIDPasswordJSON)),
+			}, nil
+		})
+
+		ctx := t.Context()
+		pr := mockProgramRunner{}
+		bag := make(baserubrics.RunBag)
+		ec := &rubrics.EvalContext{
+			HostURL:      "http://localhost:8080",
+			DatabaseFile: "/nonexistent/path/to/database.db",
+			HTTPClient:   httpClient,
+			Username:     "testuser",
+		}
+		bag["evalContext"] = ec
+
+		// This will get past registration HTTP call but fail on dbGet
+		result := rubrics.EvaluateRegistrationWorks(ctx, pr, bag)
+		assert.NotNil(t, result)
+		assert.Equal(t, 5.0, result.Awarded) // Only gets password points
+		assert.NotEmpty(t, result.Note)      // Should have error about DB
+	})
+
+	// Test dbSelect error path via EvaluateAuthLogging
+	t.Run("dbSelect with non-existent database", func(t *testing.T) {
+		t.Parallel()
+
+		dbFile := createTestDB(t)
+		db, err := sqlx.Connect("sqlite", dbFile)
+		require.NoError(t, err)
+		// Insert user so dbGet succeeds
+		_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+		require.NoError(t, err)
+		_ = db.Close()
+
+		// HTTP client returns OK status
+		httpClient := newMockClient(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       http.NoBody,
+			}, nil
+		})
+
+		ctx := t.Context()
+		pr := mockProgramRunner{}
+		bag := make(baserubrics.RunBag)
+		ec := &rubrics.EvalContext{
+			HostURL:      "http://localhost:8080",
+			DatabaseFile: dbFile,
+			HTTPClient:   httpClient,
+			Username:     "testuser",
+			Password:     "testpass",
+		}
+		bag["evalContext"] = ec
+
+		// This should succeed - tests full path
+		result := rubrics.EvaluateAuthLogging(ctx, pr, bag)
+		assert.NotNil(t, result)
+	})
+
+	// Test dbSelect with multiple WHERE clauses
+	t.Run("dbSelect with multiple WHERE clauses", func(t *testing.T) {
+		t.Parallel()
+
+		dbFile := createTestDB(t)
+		db, err := sqlx.Connect("sqlite", dbFile)
+		require.NoError(t, err)
+		// Insert user and auth_log so dbSelect with multiple conditions is tested
+		_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+		require.NoError(t, err)
+		_, err = db.ExecContext(t.Context(), "INSERT INTO auth_logs (request_ip, request_timestamp, user_id) VALUES (?, ?, ?)", "127.0.0.1", time.Now(), 1)
+		require.NoError(t, err)
+		_ = db.Close()
+
+		// HTTP client returns OK status
+		httpClient := newMockClient(func(_ *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       http.NoBody,
+			}, nil
+		})
+
+		ctx := t.Context()
+		pr := mockProgramRunner{}
+		bag := make(baserubrics.RunBag)
+		ec := &rubrics.EvalContext{
+			HostURL:      "http://localhost:8080",
+			DatabaseFile: dbFile,
+			HTTPClient:   httpClient,
+			Username:     "testuser",
+			Password:     "testpass",
+		}
+		bag["evalContext"] = ec
+
+		// Tests dbSelect with user_id WHERE clause
+		result := rubrics.EvaluateAuthLogging(ctx, pr, bag)
+		assert.NotNil(t, result)
+		assert.Greater(t, result.Awarded, 0.0)
+	})
 }

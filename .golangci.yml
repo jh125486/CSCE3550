@@ -74,8 +74,11 @@ linters:
         - opinionated
         - performance
         - style
+      settings:
+        hugeParam:
+          sizeThreshold: 140
     gocyclo:
-      min-complexity: 20
+      min-complexity: 20      
     lll:
       line-length: 140
     nakedret:

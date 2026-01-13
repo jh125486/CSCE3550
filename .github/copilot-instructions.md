@@ -303,5 +303,5 @@ func createTestStorage(t *testing.T) *Storage {
 
 **Remember**: 
 - Write code for humans first, computers second. Clarity beats cleverness.
-- Do not use `sed`. Use find and replace instead.
+- Do not use `sed`, `awk`, `ruby`, `python`. Use find and replace instead.
 - Do not make "back up files" when editing. Just undo or git checkout if needed.

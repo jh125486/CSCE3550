@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"fmt"
+	"net/http"
 	"path/filepath"
 
 	"github.com/google/uuid"
@@ -31,11 +32,12 @@ func resolvePath(basePath, path string) string {
 }
 
 // ExecuteProject1 executes the project1 grading flow using a runtime config.
-func ExecuteProject1(ctx context.Context, cfg *client.Config, port int) error {
+func ExecuteProject1(ctx context.Context, cfg *client.Config, clientHTTP *http.Client, port int) error {
 	bag := make(baserubrics.RunBag)
-	bag["evalContext"] = &rubrics.EvalContext{
-		HostURL: fmt.Sprintf("http://127.0.0.1:%d", port),
-	}
+	baserubrics.SetBagValue(bag, rubrics.EvalContextKey, rubrics.NewEvalContext(fmt.Sprintf("http://127.0.0.1:%d", port),
+		rubrics.WithHTTPClient(clientHTTP),
+	))
+
 	return client.ExecuteProject(ctx, cfg, "CSCE3550:Project1", project1Instructions, bag,
 		rubrics.EvaluateValidJWT,
 		rubrics.EvaluateExpiredJWT,
@@ -47,13 +49,14 @@ func ExecuteProject1(ctx context.Context, cfg *client.Config, port int) error {
 }
 
 // ExecuteProject2 executes the project2 grading flow using a runtime config.
-func ExecuteProject2(ctx context.Context, cfg *client.Config, port int, databaseFile, codeDir string) error {
+func ExecuteProject2(ctx context.Context, cfg *client.Config, clientHTTP *http.Client, port int, databaseFile, codeDir string) error {
 	bag := make(baserubrics.RunBag)
-	bag["evalContext"] = &rubrics.EvalContext{
-		HostURL:      fmt.Sprintf("http://127.0.0.1:%d", port),
-		DatabaseFile: resolvePath(cfg.Dir.String(), databaseFile),
-		SrcDir:       resolvePath(cfg.Dir.String(), codeDir),
-	}
+	baserubrics.SetBagValue(bag, rubrics.EvalContextKey, rubrics.NewEvalContext(fmt.Sprintf("http://127.0.0.1:%d", port),
+		rubrics.WithHTTPClient(clientHTTP),
+		rubrics.WithDatabaseFile(resolvePath(cfg.Dir.String(), databaseFile)),
+		rubrics.WithSrcDir(resolvePath(cfg.Dir.String(), codeDir)),
+	))
+
 	return client.ExecuteProject(ctx, cfg, "CSCE3550:Project2", project2Instructions, bag,
 		rubrics.EvaluateValidJWT,
 		rubrics.EvaluateValidJWKInJWKS,
@@ -63,14 +66,15 @@ func ExecuteProject2(ctx context.Context, cfg *client.Config, port int, database
 }
 
 // ExecuteProject3 executes the project3 grading flow using a runtime config.
-func ExecuteProject3(ctx context.Context, cfg *client.Config, port int, databaseFile, codeDir string) error {
+func ExecuteProject3(ctx context.Context, cfg *client.Config, clientHTTP *http.Client, port int, databaseFile, codeDir string) error {
 	bag := make(baserubrics.RunBag)
-	bag["evalContext"] = &rubrics.EvalContext{
-		HostURL:      fmt.Sprintf("http://127.0.0.1:%d", port),
-		DatabaseFile: resolvePath(cfg.Dir.String(), databaseFile),
-		SrcDir:       resolvePath(cfg.Dir.String(), codeDir),
-		Username:     "testor_" + uuid.NewString()[0:8],
-	}
+	baserubrics.SetBagValue(bag, rubrics.EvalContextKey, rubrics.NewEvalContext(fmt.Sprintf("http://127.0.0.1:%d", port),
+		rubrics.WithHTTPClient(clientHTTP),
+		rubrics.WithDatabaseFile(resolvePath(cfg.Dir.String(), databaseFile)),
+		rubrics.WithSrcDir(resolvePath(cfg.Dir.String(), codeDir)),
+		rubrics.WithUsername("testor_"+uuid.NewString()[0:8]),
+	))
+
 	return client.ExecuteProject(ctx, cfg, "CSCE3550:Project3", project3Instructions, bag,
 		rubrics.EvaluateTableExists("users", 5),
 		rubrics.EvaluateRegistrationWorks,

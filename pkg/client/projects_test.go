@@ -3,12 +3,36 @@ package client_test
 import (
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/jh125486/CSCE3550/pkg/client"
 	baseclient "github.com/jh125486/gradebot/pkg/client"
+	baserubrics "github.com/jh125486/gradebot/pkg/rubrics"
 	"github.com/stretchr/testify/assert"
 )
+
+type mockTransport struct {
+	roundTrip func(*http.Request) (*http.Response, error)
+}
+
+func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if m.roundTrip != nil {
+		return m.roundTrip(req)
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(`{}`)),
+	}, nil
+}
+
+func newMockClient() *http.Client {
+	return &http.Client{
+		Transport: &mockTransport{},
+	}
+}
 
 type stubProgram struct {
 	runErr error
@@ -21,18 +45,20 @@ func (s *stubProgram) Kill() error                                    { return n
 func (s *stubProgram) Cleanup(context.Context) error                  { return nil }
 
 func TestExecuteProject1_NilProgram(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	cfg := &baseclient.Config{
 		Dir:    baseclient.WorkDir(t.TempDir()),
 		RunCmd: "echo test",
-		// Program is nil - exercises the NewProgram branch
+		// ProgramBuilder is nil - exercises the default builder branch
 	}
 
 	// Will fail because echo isn't a long-running server, but covers the nil branch
-	_ = client.ExecuteProject1(ctx, cfg, 8080)
+	_ = client.ExecuteProject1(ctx, cfg, newMockClient(), 8080)
 }
 
 func TestExecuteProject1(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		port    int
@@ -55,6 +81,7 @@ func TestExecuteProject1(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			runErr := error(nil)
 			if tt.wantErr {
 				runErr = errors.New("run failure")
@@ -62,12 +89,14 @@ func TestExecuteProject1(t *testing.T) {
 
 			ctx := t.Context()
 			cfg := &baseclient.Config{
-				Dir:     baseclient.WorkDir(t.TempDir()),
-				RunCmd:  tt.runCmd,
-				Program: &stubProgram{runErr: runErr},
+				Dir:    baseclient.WorkDir(t.TempDir()),
+				RunCmd: tt.runCmd,
+				ProgramBuilder: func(_, _ string) (baserubrics.ProgramRunner, error) {
+					return &stubProgram{runErr: runErr}, nil
+				},
 			}
 
-			err := client.ExecuteProject1(ctx, cfg, tt.port)
+			err := client.ExecuteProject1(ctx, cfg, newMockClient(), tt.port)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -78,15 +107,17 @@ func TestExecuteProject1(t *testing.T) {
 }
 
 func TestExecuteProject2_NilProgram(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	cfg := &baseclient.Config{
 		Dir:    baseclient.WorkDir(t.TempDir()),
 		RunCmd: "echo test",
 	}
-	_ = client.ExecuteProject2(ctx, cfg, 8080, "test.db", ".")
+	_ = client.ExecuteProject2(ctx, cfg, newMockClient(), 8080, "test.db", ".")
 }
 
 func TestExecuteProject2(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		port         int
@@ -115,6 +146,7 @@ func TestExecuteProject2(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			runErr := error(nil)
 			if tt.wantErr {
 				runErr = errors.New("run failure")
@@ -122,12 +154,14 @@ func TestExecuteProject2(t *testing.T) {
 
 			ctx := t.Context()
 			cfg := &baseclient.Config{
-				Dir:     baseclient.WorkDir(t.TempDir()),
-				RunCmd:  tt.runCmd,
-				Program: &stubProgram{runErr: runErr},
+				Dir:    baseclient.WorkDir(t.TempDir()),
+				RunCmd: tt.runCmd,
+				ProgramBuilder: func(_, _ string) (baserubrics.ProgramRunner, error) {
+					return &stubProgram{runErr: runErr}, nil
+				},
 			}
 
-			err := client.ExecuteProject2(ctx, cfg, tt.port, tt.databaseFile, tt.codeDir)
+			err := client.ExecuteProject2(ctx, cfg, newMockClient(), tt.port, tt.databaseFile, tt.codeDir)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {
@@ -138,15 +172,17 @@ func TestExecuteProject2(t *testing.T) {
 }
 
 func TestExecuteProject3_NilProgram(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	cfg := &baseclient.Config{
 		Dir:    baseclient.WorkDir(t.TempDir()),
 		RunCmd: "echo test",
 	}
-	_ = client.ExecuteProject3(ctx, cfg, 8080, "test.db", ".")
+	_ = client.ExecuteProject3(ctx, cfg, newMockClient(), 8080, "test.db", ".")
 }
 
 func TestExecuteProject3(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		port         int
@@ -175,6 +211,7 @@ func TestExecuteProject3(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			runErr := error(nil)
 			if tt.wantErr {
 				runErr = errors.New("run failure")
@@ -182,12 +219,14 @@ func TestExecuteProject3(t *testing.T) {
 
 			ctx := t.Context()
 			cfg := &baseclient.Config{
-				Dir:     baseclient.WorkDir(t.TempDir()),
-				RunCmd:  tt.runCmd,
-				Program: &stubProgram{runErr: runErr},
+				Dir:    baseclient.WorkDir(t.TempDir()),
+				RunCmd: tt.runCmd,
+				ProgramBuilder: func(_, _ string) (baserubrics.ProgramRunner, error) {
+					return &stubProgram{runErr: runErr}, nil
+				},
 			}
 
-			err := client.ExecuteProject3(ctx, cfg, tt.port, tt.databaseFile, tt.codeDir)
+			err := client.ExecuteProject3(ctx, cfg, newMockClient(), tt.port, tt.databaseFile, tt.codeDir)
 			if tt.wantErr {
 				assert.Error(t, err)
 			} else {

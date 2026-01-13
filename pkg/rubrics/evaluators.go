@@ -35,14 +35,10 @@ const (
 	Username             = "userABC"
 	Password             = "password123"
 
-	rsaPrefix = "-----BEGIN RSA PRIVATE KEY-----" // #nosec G101 - Not a credential
-	rsaSuffix = "-----END RSA PRIVATE KEY-----"
-)
+	EvalContextKey = "evalContext"
 
-// HTTPClient defines the interface for making HTTP requests
-type HTTPClient interface {
-	Do(*http.Request) (*http.Response, error)
-}
+	rsaPrefix = "-----BEGIN RSA PRIVATE KEY-----" // #nosec G101 - Not a credential
+)
 
 // parameterizedInsertion matches SQL parameterized insert statements for keys table
 var parameterizedInsertion = regexp.MustCompile(
@@ -79,19 +75,80 @@ type (
 		Password     string
 		DatabaseFile string
 		SrcDir       string
-		HTTPClient   HTTPClient
+		HTTPClient   *http.Client
+		JWTParser    func(tokenString string, claims jwt.Claims) (*jwt.Token, error)
 	}
 )
 
-// GetHTTPClient returns the HTTP client, defaulting to a basic client if not set
-func (ec *EvalContext) GetHTTPClient() HTTPClient {
-	if ec.HTTPClient == nil {
-		return &http.Client{
+// EvalContextOption is a functional option for configuring EvalContext
+type EvalContextOption func(*EvalContext)
+
+// NewEvalContext creates a new evaluation context with default JWT parser
+func NewEvalContext(hostURL string, opts ...EvalContextOption) *EvalContext {
+	// Defaults
+	ec := &EvalContext{
+		HostURL: hostURL,
+		HTTPClient: &http.Client{
 			Transport: http.DefaultTransport,
 			Timeout:   2 * time.Second,
-		}
+		},
 	}
-	return ec.HTTPClient
+	// Options
+	for _, opt := range opts {
+		opt(ec)
+	}
+	// Set default JWT parser if not provided
+	if ec.JWTParser == nil {
+		ec.JWTParser = defaultJWTParser(ec.HostURL+JWKSEndpoint, keyfunc.Options{
+			Client: ec.HTTPClient,
+		})
+	}
+
+	return ec
+}
+
+// WithJWTParser sets a custom JWT parser function
+func WithJWTParser(parser func(tokenString string, claims jwt.Claims) (*jwt.Token, error)) EvalContextOption {
+	return func(ec *EvalContext) {
+		ec.JWTParser = parser
+	}
+}
+
+func WithHTTPClient(client *http.Client) EvalContextOption {
+	return func(ec *EvalContext) {
+		ec.HTTPClient = client
+	}
+}
+
+// WithDatabaseFile sets the database file path
+func WithDatabaseFile(file string) EvalContextOption {
+	return func(ec *EvalContext) {
+		ec.DatabaseFile = file
+	}
+}
+
+// WithSrcDir sets the source directory path
+func WithSrcDir(dir string) EvalContextOption {
+	return func(ec *EvalContext) {
+		ec.SrcDir = dir
+	}
+}
+
+// WithUsername sets the username for authentication
+func WithUsername(username string) EvalContextOption {
+	return func(ec *EvalContext) {
+		ec.Username = username
+	}
+}
+
+func defaultJWTParser(jwksEndpoint string, options keyfunc.Options) func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
+	return func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
+		jwks, err := keyfunc.Get(jwksEndpoint, options)
+		if err != nil {
+			return nil, err
+		}
+		return jwt.ParseWithClaims(tokenString, claims, jwks.Keyfunc)
+	}
 }
 
 // EvaluateValidJWT checks if valid JWT authentication works
@@ -101,7 +158,7 @@ func EvaluateValidJWT(_ context.Context, _ baserubrics.ProgramRunner, bag baseru
 		Points: 15,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, EvalContextKey)
 	validJWT, err := authentication(ec, false)
 	if err != nil && !errors.Is(err, jwt.ErrTokenSignatureInvalid) {
 		item.Note = err.Error()
@@ -110,7 +167,7 @@ func EvaluateValidJWT(_ context.Context, _ baserubrics.ProgramRunner, bag baseru
 
 	ec.ValidJWT = validJWT
 	bag["validJWT"] = validJWT
-	bag["evalContext"] = ec
+	bag[EvalContextKey] = ec
 	item.Awarded = 15
 	return item
 }
@@ -122,20 +179,14 @@ func EvaluateExpiredJWT(_ context.Context, _ baserubrics.ProgramRunner, bag base
 		Points: 5,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	t, err := authentication(ec, true)
 	switch {
 	case t == nil:
 		item.Note = "expected expired JWT to exist"
 		return item
-	case t.Header == nil:
-		item.Note = "expected expired JWT header to exist"
-		return item
 	case err == nil:
 		item.Note = "expected expired JWT to error"
-		return item
-	case t.Valid:
-		item.Note = "expected expired JWT to be invalid"
 		return item
 	}
 
@@ -143,6 +194,7 @@ func EvaluateExpiredJWT(_ context.Context, _ baserubrics.ProgramRunner, bag base
 	bag["expiredJWT"] = t
 	bag["evalContext"] = ec
 	item.Awarded = 5
+
 	return item
 }
 
@@ -154,7 +206,7 @@ func EvaluateHTTPMethods(_ context.Context, _ baserubrics.ProgramRunner, bag bas
 		Awarded: 1, // free point for even math
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	badMethods := map[string][]string{
 		AuthEndpoint: {
 			http.MethodGet,
@@ -171,7 +223,7 @@ func EvaluateHTTPMethods(_ context.Context, _ baserubrics.ProgramRunner, bag bas
 		},
 	}
 
-	client := ec.GetHTTPClient()
+	client := ec.HTTPClient
 
 	for endpoint, methods := range badMethods {
 		for _, method := range methods {
@@ -200,13 +252,15 @@ func EvaluateValidJWKInJWKS(_ context.Context, _ baserubrics.ProgramRunner, bag 
 		Points: 20,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	if ec.ValidJWT == nil {
 		item.Note = "no valid JWT found"
 		return item
 	}
 
-	jwks, err := keyfunc.Get(ec.HostURL+JWKSEndpoint, keyfunc.Options{})
+	jwks, err := keyfunc.Get(ec.HostURL+JWKSEndpoint, keyfunc.Options{
+		Client: ec.HTTPClient,
+	})
 	if err != nil {
 		item.Note = err.Error()
 		return item
@@ -217,7 +271,7 @@ func EvaluateValidJWKInJWKS(_ context.Context, _ baserubrics.ProgramRunner, bag 
 		item.Note = err.Error()
 		req, err2 := http.NewRequestWithContext(context.Background(), http.MethodGet, ec.HostURL+JWKSEndpoint, http.NoBody)
 		if err2 == nil {
-			resp, err3 := ec.GetHTTPClient().Do(req)
+			resp, err3 := ec.HTTPClient.Do(req)
 			if err3 == nil {
 				defer resp.Body.Close()
 				b, _ := httputil.DumpResponse(resp, true)
@@ -238,7 +292,7 @@ func EvaluateExpiredJWTIsExpired(_ context.Context, _ baserubrics.ProgramRunner,
 		Points: 5,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	if ec.ExpiredJWT == nil {
 		item.Note = "no expired JWT found"
 		return item
@@ -269,13 +323,15 @@ func EvaluateExpiredJWKNotInJWKS(_ context.Context, _ baserubrics.ProgramRunner,
 		Points: 10,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	if ec.ExpiredJWT == nil {
 		item.Note = "no expired JWT found"
 		return item
 	}
 
-	jwks, err := keyfunc.Get(ec.HostURL+JWKSEndpoint, keyfunc.Options{})
+	jwks, err := keyfunc.Get(ec.HostURL+JWKSEndpoint, keyfunc.Options{
+		Client: ec.HTTPClient,
+	})
 	if err != nil {
 		item.Note = err.Error()
 		return item
@@ -295,27 +351,24 @@ func EvaluateExpiredJWKNotInJWKS(_ context.Context, _ baserubrics.ProgramRunner,
 }
 
 // EvaluateDatabaseExists checks if database exists with valid and expired keys
-func EvaluateDatabaseExists(_ context.Context, _ baserubrics.ProgramRunner, bag baserubrics.RunBag) baserubrics.RubricItem {
+func EvaluateDatabaseExists(ctx context.Context, _ baserubrics.ProgramRunner, bag baserubrics.RunBag) baserubrics.RubricItem {
 	item := baserubrics.RubricItem{
 		Name:   "Database exists",
 		Points: 15,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	if _, err := os.Stat(ec.DatabaseFile); err != nil {
 		item.Note = err.Error()
 		return item
 	}
 	item.Awarded += 5
 
-	db, err := sql.Open("sqlite", ec.DatabaseFile)
-	if err != nil {
-		item.Note = err.Error()
-		return item
-	}
+	// sql.Open does not verify the file exists, and only errors on bad drivers.
+	db, _ := sql.Open("sqlite", ec.DatabaseFile)
 	defer func() { _ = db.Close() }()
 
-	rows, err := db.QueryContext(context.Background(), "SELECT * FROM keys")
+	rows, err := db.QueryContext(ctx, "SELECT * FROM keys")
 	if err != nil {
 		item.Note = err.Error()
 		return item
@@ -372,7 +425,7 @@ func EvaluateDatabaseQueryUsesParameters(_ context.Context, _ baserubrics.Progra
 		Points: 15,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	err := fs.WalkDir(os.DirFS(ec.SrcDir), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -409,7 +462,7 @@ func EvaluateTableExists(table string, points float64) baserubrics.Evaluator {
 			Points: points,
 		}
 
-		ec := getEvalContext(bag)
+		ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 		if _, err := os.Stat(ec.DatabaseFile); err != nil {
 			item.Note = err.Error()
 			return item
@@ -444,7 +497,7 @@ func EvaluateRegistrationWorks(_ context.Context, _ baserubrics.ProgramRunner, b
 		Points: 20,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	resp, err := registration(ec, ec.Username)
 	if err != nil {
 		item.Note = err.Error()
@@ -510,7 +563,7 @@ func EvaluatePrivateKeysEncrypted(_ context.Context, _ baserubrics.ProgramRunner
 		Points: 25,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	keys, err := dbSelect[key](ec, "keys", nil)
 	if err != nil {
 		item.Note = err.Error()
@@ -539,7 +592,7 @@ func EvaluateAuthLogging(_ context.Context, _ baserubrics.ProgramRunner, bag bas
 		Points: 10,
 	}
 
-	ec := getEvalContext(bag)
+	ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 	resp, err := authenticationWithCreds(ec, ec.Username, ec.Password)
 	if err != nil {
 		item.Note = err.Error()
@@ -589,7 +642,7 @@ func EvaluateRateLimiting(endpoint string, rps int) baserubrics.Evaluator {
 			Points: 25,
 		}
 
-		ec := getEvalContext(bag)
+		ec := baserubrics.BagValue[EvalContext](bag, "evalContext")
 
 		// quiesce for a second
 		time.Sleep(time.Second)
@@ -630,13 +683,6 @@ func EvaluateRateLimiting(endpoint string, rps int) baserubrics.Evaluator {
 
 // Helper functions
 
-func getEvalContext(bag baserubrics.RunBag) *EvalContext {
-	if ec, ok := bag["evalContext"].(*EvalContext); ok {
-		return ec
-	}
-	return &EvalContext{}
-}
-
 func authentication(ec *EvalContext, expired bool) (*jwt.Token, error) {
 	resp, err := authenticatePostForm(ec, expired)
 	if err != nil {
@@ -676,9 +722,8 @@ func authentication(ec *EvalContext, expired bool) (*jwt.Token, error) {
 		return nil, errors.New(`no JWT found in response. Tried raw, JSON["jwt"] and JSON["token"]`)
 	}
 
-	return jwt.ParseWithClaims(string(body), &jwt.RegisteredClaims{}, func(token *jwt.Token) (any, error) {
-		return token, nil
-	})
+	// Parse using the configured parser (verifies in prod, mocks in test)
+	return ec.JWTParser(string(body), &jwt.RegisteredClaims{})
 }
 
 func authenticatePostJSON(ec *EvalContext, expired bool) (*http.Response, error) {
@@ -704,7 +749,7 @@ func authenticatePostJSON(ec *EvalContext, expired bool) (*http.Response, error)
 		req.URL.RawQuery = q.Encode()
 	}
 
-	return ec.GetHTTPClient().Do(req)
+	return ec.HTTPClient.Do(req)
 }
 
 func authenticatePostForm(ec *EvalContext, expired bool) (*http.Response, error) {
@@ -725,7 +770,7 @@ func authenticatePostForm(ec *EvalContext, expired bool) (*http.Response, error)
 		req.URL.RawQuery = q.Encode()
 	}
 
-	return ec.GetHTTPClient().Do(req)
+	return ec.HTTPClient.Do(req)
 }
 
 func registration(ec *EvalContext, username string) (*http.Response, error) {
@@ -744,7 +789,7 @@ func registration(ec *EvalContext, username string) (*http.Response, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept-Type", "application/json")
 
-	return ec.GetHTTPClient().Do(req)
+	return ec.HTTPClient.Do(req)
 }
 
 func authenticationWithCreds(ec *EvalContext, username, password string) (*http.Response, error) {
@@ -763,7 +808,7 @@ func authenticationWithCreds(ec *EvalContext, username, password string) (*http.
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept-Type", "application/json")
 
-	resp, err := ec.GetHTTPClient().Do(req)
+	resp, err := ec.HTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
