@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"log"
 	"os"
 	"os/signal"
@@ -13,17 +12,13 @@ import (
 	basecli "github.com/jh125486/gradebot/pkg/cli"
 )
 
-var buildID string
-
 func main() {
-	if buildID == "" {
-		buildID = os.Getenv("BUILD_ID")
-	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	buildID := os.Getenv("BUILD_ID")
 	var cli app.CLI
-	if err := basecli.NewKongContext(ctx, "gradebot", sha256.Sum256([]byte(buildID)), &cli, os.Args[1:]).
+	if err := basecli.NewKongContext(ctx, "gradebot", buildID, &cli, os.Args[1:]).
 		Run(ctx); err != nil {
 		log.Fatalf("Failed to execute command: %v", err)
 	}

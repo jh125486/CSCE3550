@@ -38,14 +38,20 @@ func newMockClient() *http.Client {
 	}
 }
 
+func newTestService() *basecli.Service {
+	return &basecli.Service{
+		Client: newMockClient(),
+		Stdin:  strings.NewReader("n\n"),
+		Stdout: &bytes.Buffer{},
+	}
+}
+
 func TestProject1CmdRun(t *testing.T) {
 	t.Parallel()
 	type args struct {
 		port      int
 		serverURL string
-		client    *http.Client
-		stdin     io.Reader
-		stdout    io.Writer
+		svc       *basecli.Service
 	}
 	tests := []struct {
 		name    string
@@ -55,10 +61,8 @@ func TestProject1CmdRun(t *testing.T) {
 		{
 			name: "successful run",
 			args: args{
-				port:   8080,
-				client: newMockClient(),
-				stdin:  strings.NewReader("n\n"),
-				stdout: &bytes.Buffer{},
+				port: 8080,
+				svc:  newTestService(),
 			},
 			wantErr: require.NoError,
 		},
@@ -67,13 +71,10 @@ func TestProject1CmdRun(t *testing.T) {
 			args: args{
 				port:      8080,
 				serverURL: "http://example.com",
-				client:    newMockClient(),
-				stdin:     strings.NewReader("n\n"),
-				stdout:    &bytes.Buffer{},
+				svc:       newTestService(),
 			},
 			wantErr: require.NoError,
 		},
-		// Covers ensureDeps nil checks
 		{
 			name: defaultsName,
 			args: args{
@@ -86,21 +87,20 @@ func TestProject1CmdRun(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			// Helper to clean up "defaults" test case
 			port := tt.args.port
+			svc := tt.args.svc
 			if tt.name == defaultsName {
-				// Start a dummy server to prevent hanging when using DefaultClient
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusNotFound)
 				}))
 				defer ts.Close()
 
 				addr := ts.Listener.Addr().String()
-				// Extract port
 				parts := strings.Split(addr, ":")
 				var err error
 				port, err = strconv.Atoi(parts[len(parts)-1])
 				require.NoError(t, err)
+				svc = basecli.NewService("test-build-id")
 			}
 
 			cmd := app.Project1Cmd{
@@ -110,13 +110,12 @@ func TestProject1CmdRun(t *testing.T) {
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
-				Port:   port,
-				Client: tt.args.client,
-				Stdin:  tt.args.stdin,
-				Stdout: tt.args.stdout,
+				PortArg: app.PortArg{
+					Port: port,
+				},
 			}
 
-			err := cmd.Run(basecli.Context{Context: t.Context()})
+			err := cmd.Run(basecli.Context{Context: t.Context()}, svc)
 			tt.wantErr(t, err)
 		})
 	}
@@ -129,9 +128,7 @@ func TestProject2CmdRun(t *testing.T) {
 		codeDir      string
 		databaseFile string
 		serverURL    string
-		client       *http.Client
-		stdin        io.Reader
-		stdout       io.Writer
+		svc          *basecli.Service
 	}
 	tests := []struct {
 		name    string
@@ -144,9 +141,7 @@ func TestProject2CmdRun(t *testing.T) {
 				port:         8080,
 				codeDir:      ".",
 				databaseFile: "test.db",
-				client:       newMockClient(),
-				stdin:        strings.NewReader("n\n"),
-				stdout:       &bytes.Buffer{},
+				svc:          newTestService(),
 			},
 			wantErr: require.NoError,
 		},
@@ -157,9 +152,7 @@ func TestProject2CmdRun(t *testing.T) {
 				codeDir:      ".",
 				databaseFile: "test.db",
 				serverURL:    "http://example.com",
-				client:       newMockClient(),
-				stdin:        strings.NewReader("n\n"),
-				stdout:       &bytes.Buffer{},
+				svc:          newTestService(),
 			},
 			wantErr: require.NoError,
 		},
@@ -182,8 +175,8 @@ func TestProject2CmdRun(t *testing.T) {
 				dbFile = "test.db"
 			}
 
-			// Helper to clean up "defaults" test case
 			port := tt.args.port
+			svc := tt.args.svc
 			if tt.name == defaultsName {
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusNotFound)
@@ -193,6 +186,7 @@ func TestProject2CmdRun(t *testing.T) {
 				var err error
 				port, err = strconv.Atoi(parts[len(parts)-1])
 				require.NoError(t, err)
+				svc = basecli.NewService("test-build-id")
 			}
 
 			cmd := app.Project2Cmd{
@@ -202,15 +196,18 @@ func TestProject2CmdRun(t *testing.T) {
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
-				Port:         port,
-				DatabaseFile: tempDir + "/" + dbFile,
-				CodeDir:      tt.args.codeDir,
-				Client:       tt.args.client,
-				Stdin:        tt.args.stdin,
-				Stdout:       tt.args.stdout,
+				PortArg: app.PortArg{
+					Port: port,
+				},
+				DBFileCodeArg: app.DBFileCodeArg{
+					DatabaseFile: tempDir + "/" + dbFile,
+				},
+				CodeDirArg: app.CodeDirArg{
+					CodeDir: tt.args.codeDir,
+				},
 			}
 
-			err := cmd.Run(basecli.Context{Context: t.Context()})
+			err := cmd.Run(basecli.Context{Context: t.Context()}, svc)
 			tt.wantErr(t, err)
 		})
 	}
@@ -223,9 +220,7 @@ func TestProject3CmdRun(t *testing.T) {
 		codeDir      string
 		databaseFile string
 		serverURL    string
-		client       *http.Client
-		stdin        io.Reader
-		stdout       io.Writer
+		svc          *basecli.Service
 	}
 	tests := []struct {
 		name    string
@@ -238,9 +233,7 @@ func TestProject3CmdRun(t *testing.T) {
 				port:         8080,
 				codeDir:      ".",
 				databaseFile: "test.db",
-				client:       newMockClient(),
-				stdin:        strings.NewReader("n\n"),
-				stdout:       &bytes.Buffer{},
+				svc:          newTestService(),
 			},
 			wantErr: require.NoError,
 		},
@@ -251,9 +244,7 @@ func TestProject3CmdRun(t *testing.T) {
 				codeDir:      ".",
 				databaseFile: "test.db",
 				serverURL:    "http://example.com",
-				client:       newMockClient(),
-				stdin:        strings.NewReader("n\n"),
-				stdout:       &bytes.Buffer{},
+				svc:          newTestService(),
 			},
 			wantErr: require.NoError,
 		},
@@ -276,8 +267,8 @@ func TestProject3CmdRun(t *testing.T) {
 				dbFile = "test.db"
 			}
 
-			// Helper to clean up "defaults" test case
 			port := tt.args.port
+			svc := tt.args.svc
 			if tt.name == defaultsName {
 				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusNotFound)
@@ -287,6 +278,7 @@ func TestProject3CmdRun(t *testing.T) {
 				var err error
 				port, err = strconv.Atoi(parts[len(parts)-1])
 				require.NoError(t, err)
+				svc = basecli.NewService("test-build-id")
 			}
 
 			cmd := app.Project3Cmd{
@@ -296,15 +288,18 @@ func TestProject3CmdRun(t *testing.T) {
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
-				Port:         port,
-				DatabaseFile: tempDir + "/" + dbFile,
-				CodeDir:      tt.args.codeDir,
-				Client:       tt.args.client,
-				Stdin:        tt.args.stdin,
-				Stdout:       tt.args.stdout,
+				PortArg: app.PortArg{
+					Port: port,
+				},
+				DBFileCodeArg: app.DBFileCodeArg{
+					DatabaseFile: tempDir + "/" + dbFile,
+				},
+				CodeDirArg: app.CodeDirArg{
+					CodeDir: tt.args.codeDir,
+				},
 			}
 
-			err := cmd.Run(basecli.Context{Context: t.Context()})
+			err := cmd.Run(basecli.Context{Context: t.Context()}, svc)
 			tt.wantErr(t, err)
 		})
 	}

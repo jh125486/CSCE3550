@@ -1,10 +1,6 @@
 package app
 
 import (
-	"io"
-	"net/http"
-	"os"
-
 	"github.com/jh125486/CSCE3550/pkg/client"
 	basecli "github.com/jh125486/gradebot/pkg/cli"
 	baseclient "github.com/jh125486/gradebot/pkg/client"
@@ -21,131 +17,87 @@ type (
 	// Project1Cmd defines the command structure for running Project 1 grading.
 	Project1Cmd struct {
 		basecli.CommonArgs
-		Port int `default:"8080" help:"Port to check" name:"port" short:"p"`
-
-		Client *http.Client `kong:"-"`
-		Stdin  io.Reader    `kong:"-"`
-		Stdout io.Writer    `kong:"-"`
+		PortArg
 	}
 	// Project2Cmd defines the command structure for running Project 2 grading.
 	Project2Cmd struct {
 		basecli.CommonArgs
-		Port         int    `default:"8080"                          help:"Port to check"                     name:"port"     short:"p"`
-		DatabaseFile string `default:"totally_not_my_privateKeys.db" help:"Path to the database file"         name:"database"`
-		CodeDir      string `default:"."                             help:"Path to the source code directory" name:"code-dir"`
-
-		Client *http.Client `kong:"-"`
-		Stdin  io.Reader    `kong:"-"`
-		Stdout io.Writer    `kong:"-"`
+		PortArg
+		CodeDirArg
+		DBFileCodeArg
 	}
 	// Project3Cmd defines the command structure for running Project 3 grading.
 	Project3Cmd struct {
 		basecli.CommonArgs
-		Port         int    `default:"8080"                          help:"Port to check"                     name:"port"     short:"p"`
-		DatabaseFile string `default:"totally_not_my_privateKeys.db" help:"Path to the database file"         name:"database"`
-		CodeDir      string `default:"."                             help:"Path to the source code directory" name:"code-dir"`
+		PortArg
+		CodeDirArg
+		DBFileCodeArg
+	}
 
-		Client *http.Client `kong:"-"`
-		Stdin  io.Reader    `kong:"-"`
-		Stdout io.Writer    `kong:"-"`
+	PortArg struct {
+		Port int `default:"8080" help:"Port to check" name:"port" short:"p"`
+	}
+	CodeDirArg struct {
+		CodeDir string `default:"." help:"Path to the source code directory" name:"code-dir"`
+	}
+	DBFileCodeArg struct {
+		DatabaseFile string `default:"totally_not_my_privateKeys.db" help:"Path to the database file" name:"database"`
 	}
 )
 
-func (cmd *Project1Cmd) ensureDeps() {
-	if cmd.Client == nil {
-		cmd.Client = http.DefaultClient
-	}
-	if cmd.Stdin == nil {
-		cmd.Stdin = os.Stdin
-	}
-	if cmd.Stdout == nil {
-		cmd.Stdout = os.Stdout
-	}
-}
-
-func (cmd *Project2Cmd) ensureDeps() {
-	if cmd.Client == nil {
-		cmd.Client = http.DefaultClient
-	}
-	if cmd.Stdin == nil {
-		cmd.Stdin = os.Stdin
-	}
-	if cmd.Stdout == nil {
-		cmd.Stdout = os.Stdout
-	}
-}
-
-func (cmd *Project3Cmd) ensureDeps() {
-	if cmd.Client == nil {
-		cmd.Client = http.DefaultClient
-	}
-	if cmd.Stdin == nil {
-		cmd.Stdin = os.Stdin
-	}
-	if cmd.Stdout == nil {
-		cmd.Stdout = os.Stdout
-	}
-}
-
 // Run executes the Project 1 grading client.
-func (cmd *Project1Cmd) Run(ctx basecli.Context) error {
-	cmd.ensureDeps()
+// The buildID is injected by Kong from the bound value.
+func (cmd *Project1Cmd) Run(ctx basecli.Context, svc *basecli.Service) error {
 	cfg := &baseclient.Config{
 		ServerURL:     cmd.ServerURL,
 		Dir:           cmd.Dir,
 		RunCmd:        cmd.RunCmd,
 		Env:           cmd.Env,
-		QualityClient: protoconnect.NewQualityServiceClient(cmd.Client, cmd.ServerURL),
-		Reader:        cmd.Stdin,
-		Writer:        cmd.Stdout,
+		QualityClient: protoconnect.NewQualityServiceClient(svc.Client, cmd.ServerURL),
+		Reader:        svc.Stdin,
+		Writer:        svc.Stdout,
 	}
-
-	// Only set RubricClient if a server URL is provided
 	if cmd.ServerURL != "" {
-		cfg.RubricClient = protoconnect.NewRubricServiceClient(cmd.Client, cmd.ServerURL)
+		cfg.RubricClient = protoconnect.NewRubricServiceClient(svc.Client, cmd.ServerURL)
 	}
 
-	return client.ExecuteProject1(ctx, cfg, cmd.Client, cmd.Port)
+	return client.ExecuteProject1(ctx, cfg, svc.Client, cmd.Port)
 }
 
 // Run executes the Project 2 grading client.
-func (cmd *Project2Cmd) Run(ctx basecli.Context) error {
-	cmd.ensureDeps()
+// The buildID is injected by Kong from the bound value.
+func (cmd *Project2Cmd) Run(ctx basecli.Context, svc *basecli.Service) error {
 	cfg := &baseclient.Config{
 		ServerURL:     cmd.ServerURL,
 		Dir:           cmd.Dir,
 		RunCmd:        cmd.RunCmd,
 		Env:           cmd.Env,
-		QualityClient: protoconnect.NewQualityServiceClient(cmd.Client, cmd.ServerURL),
-		Reader:        cmd.Stdin,
-		Writer:        cmd.Stdout,
+		QualityClient: protoconnect.NewQualityServiceClient(svc.Client, cmd.ServerURL),
+		Reader:        svc.Stdin,
+		Writer:        svc.Stdout,
 	}
-
-	// Only set RubricClient if a server URL is provided
 	if cmd.ServerURL != "" {
-		cfg.RubricClient = protoconnect.NewRubricServiceClient(cmd.Client, cmd.ServerURL)
+		cfg.RubricClient = protoconnect.NewRubricServiceClient(svc.Client, cmd.ServerURL)
 	}
 
-	return client.ExecuteProject2(ctx, cfg, cmd.Client, cmd.Port, cmd.DatabaseFile, cmd.CodeDir)
+	return client.ExecuteProject2(ctx, cfg, svc.Client, cmd.Port, cmd.DatabaseFile, cmd.CodeDir)
 }
 
 // Run executes the Project 3 grading client.
-func (cmd *Project3Cmd) Run(ctx basecli.Context) error {
-	cmd.ensureDeps()
+// The buildID is injected by Kong from the bound value.
+func (cmd *Project3Cmd) Run(ctx basecli.Context, svc *basecli.Service) error {
 	cfg := &baseclient.Config{
 		ServerURL:     cmd.ServerURL,
 		Dir:           cmd.Dir,
 		RunCmd:        cmd.RunCmd,
 		Env:           cmd.Env,
-		QualityClient: protoconnect.NewQualityServiceClient(cmd.Client, cmd.ServerURL),
-		Reader:        cmd.Stdin,
-		Writer:        cmd.Stdout,
+		QualityClient: protoconnect.NewQualityServiceClient(svc.Client, cmd.ServerURL),
+		Reader:        svc.Stdin,
+		Writer:        svc.Stdout,
 	}
-
-	// Only set RubricClient if a server URL is provided
 	if cmd.ServerURL != "" {
-		cfg.RubricClient = protoconnect.NewRubricServiceClient(cmd.Client, cmd.ServerURL)
+		cfg.RubricClient = protoconnect.NewRubricServiceClient(svc.Client, cmd.ServerURL)
 	}
 
-	return client.ExecuteProject3(ctx, cfg, cmd.Client, cmd.Port, cmd.DatabaseFile, cmd.CodeDir)
+	return client.ExecuteProject3(ctx, cfg, svc.Client, cmd.Port, cmd.DatabaseFile, cmd.CodeDir)
 }
