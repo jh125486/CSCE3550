@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"net/http"
-	"os"
 	"path"
 	"strings"
 	"testing"
@@ -15,17 +14,6 @@ import (
 	baserubrics "github.com/jh125486/gradebot/pkg/rubrics"
 	"github.com/stretchr/testify/require"
 )
-
-func TestMain(m *testing.M) {
-	// Ensure the process has a valid working directory before running tests.
-	if _, err := os.Getwd(); err != nil {
-		d, err := os.MkdirTemp("", "testcwd")
-		if err == nil {
-			_ = os.Chdir(d)
-		}
-	}
-	os.Exit(m.Run())
-}
 
 type mockTransport struct {
 	roundTrip func(*http.Request) (*http.Response, error)
