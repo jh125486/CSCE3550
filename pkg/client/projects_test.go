@@ -50,6 +50,7 @@ func TestExecuteProject1_NilProgram(t *testing.T) {
 	cfg := &baseclient.Config{
 		Dir:    baseclient.WorkDir(t.TempDir()),
 		RunCmd: "echo test",
+		Writer: io.Discard,
 		// ProgramBuilder is nil - exercises the default builder branch
 	}
 
@@ -91,6 +92,7 @@ func TestExecuteProject1(t *testing.T) {
 			cfg := &baseclient.Config{
 				Dir:    baseclient.WorkDir(t.TempDir()),
 				RunCmd: tt.runCmd,
+				Writer: io.Discard,
 				ProgramBuilder: func(_, _ string) (baserubrics.ProgramRunner, error) {
 					return &stubProgram{runErr: runErr}, nil
 				},
@@ -112,6 +114,7 @@ func TestExecuteProject2_NilProgram(t *testing.T) {
 	cfg := &baseclient.Config{
 		Dir:    baseclient.WorkDir(t.TempDir()),
 		RunCmd: "echo test",
+		Writer: io.Discard,
 	}
 	_ = client.ExecuteProject2(ctx, cfg, newMockClient(), 8080, "test.db", ".")
 }
@@ -156,6 +159,7 @@ func TestExecuteProject2(t *testing.T) {
 			cfg := &baseclient.Config{
 				Dir:    baseclient.WorkDir(t.TempDir()),
 				RunCmd: tt.runCmd,
+				Writer: io.Discard,
 				ProgramBuilder: func(_, _ string) (baserubrics.ProgramRunner, error) {
 					return &stubProgram{runErr: runErr}, nil
 				},
@@ -177,6 +181,7 @@ func TestExecuteProject3_NilProgram(t *testing.T) {
 	cfg := &baseclient.Config{
 		Dir:    baseclient.WorkDir(t.TempDir()),
 		RunCmd: "echo test",
+		Writer: io.Discard,
 	}
 	_ = client.ExecuteProject3(ctx, cfg, newMockClient(), 8080, "test.db", ".")
 }
@@ -221,6 +226,7 @@ func TestExecuteProject3(t *testing.T) {
 			cfg := &baseclient.Config{
 				Dir:    baseclient.WorkDir(t.TempDir()),
 				RunCmd: tt.runCmd,
+				Writer: io.Discard,
 				ProgramBuilder: func(_, _ string) (baserubrics.ProgramRunner, error) {
 					return &stubProgram{runErr: runErr}, nil
 				},

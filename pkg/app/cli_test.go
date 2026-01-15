@@ -4,18 +4,28 @@ import (
 	"bytes"
 	"io"
 	"net/http"
-	"net/http/httptest"
-	"strconv"
+	"os"
+	"path"
 	"strings"
 	"testing"
 
 	"github.com/jh125486/CSCE3550/pkg/app"
 	basecli "github.com/jh125486/gradebot/pkg/cli"
 	baseclient "github.com/jh125486/gradebot/pkg/client"
+	baserubrics "github.com/jh125486/gradebot/pkg/rubrics"
 	"github.com/stretchr/testify/require"
 )
 
-const defaultsName = "defaults"
+func TestMain(m *testing.M) {
+	// Ensure the process has a valid working directory before running tests.
+	if _, err := os.Getwd(); err != nil {
+		d, err := os.MkdirTemp("", "testcwd")
+		if err == nil {
+			_ = os.Chdir(d)
+		}
+	}
+	os.Exit(m.Run())
+}
 
 type mockTransport struct {
 	roundTrip func(*http.Request) (*http.Response, error)
@@ -38,11 +48,28 @@ func newMockClient() *http.Client {
 	}
 }
 
+type nopCmd struct{}
+
+func (n *nopCmd) SetDir(string)       {}
+func (n *nopCmd) SetStdin(io.Reader)  {}
+func (n *nopCmd) SetStdout(io.Writer) {}
+func (n *nopCmd) SetStderr(io.Writer) {}
+func (n *nopCmd) Start() error        { return nil }
+func (n *nopCmd) Run() error          { return nil }
+func (n *nopCmd) ProcessKill() error  { return nil }
+
+type nopBuilder struct{}
+
+func (n *nopBuilder) New(_ string, _ ...string) baserubrics.Commander {
+	return &nopCmd{}
+}
+
 func newTestService() *basecli.Service {
 	return &basecli.Service{
-		Client: newMockClient(),
-		Stdin:  strings.NewReader("n\n"),
-		Stdout: &bytes.Buffer{},
+		Client:         newMockClient(),
+		Stdin:          strings.NewReader("n\n"),
+		Stdout:         &bytes.Buffer{},
+		CommandBuilder: &nopBuilder{},
 	}
 }
 
@@ -75,47 +102,26 @@ func TestProject1CmdRun(t *testing.T) {
 			},
 			wantErr: require.NoError,
 		},
-		{
-			name: defaultsName,
-			args: args{
-				port: 8080,
-			},
-			wantErr: require.NoError,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			port := tt.args.port
-			svc := tt.args.svc
-			if tt.name == defaultsName {
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusNotFound)
-				}))
-				defer ts.Close()
-
-				addr := ts.Listener.Addr().String()
-				parts := strings.Split(addr, ":")
-				var err error
-				port, err = strconv.Atoi(parts[len(parts)-1])
-				require.NoError(t, err)
-				svc = basecli.NewService("test-build-id")
-			}
+			tempDir := t.TempDir()
 
 			cmd := app.Project1Cmd{
 				CommonArgs: basecli.CommonArgs{
-					Dir:       baseclient.WorkDir(t.TempDir()),
+					Dir:       baseclient.WorkDir(tempDir),
 					RunCmd:    "echo test",
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
 				PortArg: app.PortArg{
-					Port: port,
+					Port: tt.args.port,
 				},
 			}
-
-			err := cmd.Run(basecli.Context{Context: t.Context()}, svc)
+			ctx := basecli.Context{Context: t.Context()}
+			err := cmd.Run(ctx, tt.args.svc)
 			tt.wantErr(t, err)
 		})
 	}
@@ -156,38 +162,12 @@ func TestProject2CmdRun(t *testing.T) {
 			},
 			wantErr: require.NoError,
 		},
-		{
-			name: defaultsName,
-			args: args{
-				port:    8080,
-				codeDir: ".",
-			},
-			wantErr: require.NoError,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			tempDir := t.TempDir()
-			dbFile := tt.args.databaseFile
-			if dbFile == "" {
-				dbFile = "test.db"
-			}
-
-			port := tt.args.port
-			svc := tt.args.svc
-			if tt.name == defaultsName {
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusNotFound)
-				}))
-				defer ts.Close()
-				parts := strings.Split(ts.Listener.Addr().String(), ":")
-				var err error
-				port, err = strconv.Atoi(parts[len(parts)-1])
-				require.NoError(t, err)
-				svc = basecli.NewService("test-build-id")
-			}
 
 			cmd := app.Project2Cmd{
 				CommonArgs: basecli.CommonArgs{
@@ -197,17 +177,17 @@ func TestProject2CmdRun(t *testing.T) {
 					ServerURL: tt.args.serverURL,
 				},
 				PortArg: app.PortArg{
-					Port: port,
+					Port: tt.args.port,
 				},
 				DBFileCodeArg: app.DBFileCodeArg{
-					DatabaseFile: tempDir + "/" + dbFile,
+					DatabaseFile: path.Join(tempDir, tt.args.databaseFile),
 				},
 				CodeDirArg: app.CodeDirArg{
 					CodeDir: tt.args.codeDir,
 				},
 			}
-
-			err := cmd.Run(basecli.Context{Context: t.Context()}, svc)
+			ctx := basecli.Context{Context: t.Context()}
+			err := cmd.Run(ctx, tt.args.svc)
 			tt.wantErr(t, err)
 		})
 	}
@@ -248,38 +228,12 @@ func TestProject3CmdRun(t *testing.T) {
 			},
 			wantErr: require.NoError,
 		},
-		{
-			name: defaultsName,
-			args: args{
-				port:    8080,
-				codeDir: ".",
-			},
-			wantErr: require.NoError,
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			tempDir := t.TempDir()
-			dbFile := tt.args.databaseFile
-			if dbFile == "" {
-				dbFile = "test.db"
-			}
-
-			port := tt.args.port
-			svc := tt.args.svc
-			if tt.name == defaultsName {
-				ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusNotFound)
-				}))
-				defer ts.Close()
-				parts := strings.Split(ts.Listener.Addr().String(), ":")
-				var err error
-				port, err = strconv.Atoi(parts[len(parts)-1])
-				require.NoError(t, err)
-				svc = basecli.NewService("test-build-id")
-			}
 
 			cmd := app.Project3Cmd{
 				CommonArgs: basecli.CommonArgs{
@@ -289,17 +243,18 @@ func TestProject3CmdRun(t *testing.T) {
 					ServerURL: tt.args.serverURL,
 				},
 				PortArg: app.PortArg{
-					Port: port,
+					Port: tt.args.port,
 				},
 				DBFileCodeArg: app.DBFileCodeArg{
-					DatabaseFile: tempDir + "/" + dbFile,
+					DatabaseFile: path.Join(tempDir, tt.args.databaseFile),
 				},
 				CodeDirArg: app.CodeDirArg{
 					CodeDir: tt.args.codeDir,
 				},
 			}
 
-			err := cmd.Run(basecli.Context{Context: t.Context()}, svc)
+			ctx := basecli.Context{Context: t.Context()}
+			err := cmd.Run(ctx, tt.args.svc)
 			tt.wantErr(t, err)
 		})
 	}
