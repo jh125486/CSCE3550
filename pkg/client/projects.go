@@ -53,8 +53,8 @@ func ExecuteProject2(ctx context.Context, cfg *client.Config, clientHTTP *http.C
 	bag := make(baserubrics.RunBag)
 	baserubrics.SetBagValue(bag, rubrics.EvalContextKey, rubrics.NewEvalContext(fmt.Sprintf("http://127.0.0.1:%d", port),
 		rubrics.WithHTTPClient(clientHTTP),
-		rubrics.WithDatabaseFile(resolvePath(cfg.Dir.String(), databaseFile)),
-		rubrics.WithSrcDir(resolvePath(cfg.Dir.String(), codeDir)),
+		rubrics.WithDatabaseFile(resolvePath(cfg.WorkDir.String(), databaseFile)),
+		rubrics.WithSrcDir(resolvePath(cfg.WorkDir.String(), codeDir)),
 	))
 
 	return client.ExecuteProject(ctx, cfg, "CSCE3550:Project2", project2Instructions, bag,
@@ -70,8 +70,8 @@ func ExecuteProject3(ctx context.Context, cfg *client.Config, clientHTTP *http.C
 	bag := make(baserubrics.RunBag)
 	baserubrics.SetBagValue(bag, rubrics.EvalContextKey, rubrics.NewEvalContext(fmt.Sprintf("http://127.0.0.1:%d", port),
 		rubrics.WithHTTPClient(clientHTTP),
-		rubrics.WithDatabaseFile(resolvePath(cfg.Dir.String(), databaseFile)),
-		rubrics.WithSrcDir(resolvePath(cfg.Dir.String(), codeDir)),
+		rubrics.WithDatabaseFile(resolvePath(cfg.WorkDir.String(), databaseFile)),
+		rubrics.WithSrcDir(resolvePath(cfg.WorkDir.String(), codeDir)),
 		rubrics.WithUsername("testor_"+uuid.NewString()[0:8]),
 	))
 

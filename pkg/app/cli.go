@@ -16,22 +16,22 @@ type (
 	}
 	// Project1Cmd defines the command structure for running Project 1 grading.
 	Project1Cmd struct {
-		basecli.CommonArgs
-		PortArg
+		basecli.CommonArgs `embed:""`
+		PortArg            `embed:""`
 	}
 	// Project2Cmd defines the command structure for running Project 2 grading.
 	Project2Cmd struct {
-		basecli.CommonArgs
-		PortArg
-		CodeDirArg
-		DBFileCodeArg
+		basecli.CommonArgs `embed:""`
+		PortArg            `embed:""`
+		CodeDirArg         `embed:""`
+		DBFileCodeArg      `embed:""`
 	}
 	// Project3Cmd defines the command structure for running Project 3 grading.
 	Project3Cmd struct {
-		basecli.CommonArgs
-		PortArg
-		CodeDirArg
-		DBFileCodeArg
+		basecli.CommonArgs `embed:""`
+		PortArg            `embed:""`
+		CodeDirArg         `embed:""`
+		DBFileCodeArg      `embed:""`
 	}
 
 	PortArg struct {
@@ -50,7 +50,7 @@ type (
 func (cmd *Project1Cmd) Run(ctx basecli.Context, svc *basecli.Service) error {
 	cfg := &baseclient.Config{
 		ServerURL:     cmd.ServerURL,
-		Dir:           cmd.Dir,
+		WorkDir:       cmd.WorkDir,
 		RunCmd:        cmd.RunCmd,
 		Env:           cmd.Env,
 		QualityClient: protoconnect.NewQualityServiceClient(svc.Client, cmd.ServerURL),
@@ -69,7 +69,7 @@ func (cmd *Project1Cmd) Run(ctx basecli.Context, svc *basecli.Service) error {
 func (cmd *Project2Cmd) Run(ctx basecli.Context, svc *basecli.Service) error {
 	cfg := &baseclient.Config{
 		ServerURL:     cmd.ServerURL,
-		Dir:           cmd.Dir,
+		WorkDir:       cmd.WorkDir,
 		RunCmd:        cmd.RunCmd,
 		Env:           cmd.Env,
 		QualityClient: protoconnect.NewQualityServiceClient(svc.Client, cmd.ServerURL),
@@ -88,7 +88,7 @@ func (cmd *Project2Cmd) Run(ctx basecli.Context, svc *basecli.Service) error {
 func (cmd *Project3Cmd) Run(ctx basecli.Context, svc *basecli.Service) error {
 	cfg := &baseclient.Config{
 		ServerURL:     cmd.ServerURL,
-		Dir:           cmd.Dir,
+		WorkDir:       cmd.WorkDir,
 		RunCmd:        cmd.RunCmd,
 		Env:           cmd.Env,
 		QualityClient: protoconnect.NewQualityServiceClient(svc.Client, cmd.ServerURL),
