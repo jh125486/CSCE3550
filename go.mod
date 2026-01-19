@@ -10,7 +10,7 @@ require (
 	github.com/jh125486/gradebot v1.2.1
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/stretchr/testify v1.11.1
-	modernc.org/sqlite v1.44.1
+	modernc.org/sqlite v1.44.2
 )
 
 require (
