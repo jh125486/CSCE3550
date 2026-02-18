@@ -78,7 +78,7 @@ func mockExpiredJWTParser() func(string, jwt.Claims) (*jwt.Token, error) {
 
 type mockProgramRunner struct{}
 
-func (mockProgramRunner) Run(_ ...string) error {
+func (mockProgramRunner) Run(_ context.Context, _ ...string) error {
 	return nil
 }
 

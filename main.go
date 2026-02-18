@@ -8,17 +8,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jh125486/CSCE3550/pkg/app"
+	"github.com/jh125486/CSCE3550/pkg/cli"
 	basecli "github.com/jh125486/gradebot/pkg/cli"
+)
+
+var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
 )
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	buildID := os.Getenv("BUILD_ID")
-	var cli app.CLI
-	if err := basecli.NewKongContext(ctx, "gradebot", buildID, &cli, os.Args[1:]).
+	var grammar cli.CLI
+	if err := basecli.NewKongContext(ctx, "gradebot", version, commit, date, &grammar, os.Args[1:]).
 		Run(ctx); err != nil {
 		log.Fatalf("Failed to execute command: %v", err)
 	}

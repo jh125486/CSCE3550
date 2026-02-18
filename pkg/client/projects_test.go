@@ -39,7 +39,7 @@ type stubProgram struct {
 }
 
 func (s *stubProgram) Path() string                                   { return "" }
-func (s *stubProgram) Run(_ ...string) error                          { return s.runErr }
+func (s *stubProgram) Run(_ context.Context, _ ...string) error       { return s.runErr }
 func (s *stubProgram) Do(string) (stdout, stderr []string, err error) { return nil, nil, nil }
 func (s *stubProgram) Kill() error                                    { return nil }
 func (s *stubProgram) Cleanup(context.Context) error                  { return nil }

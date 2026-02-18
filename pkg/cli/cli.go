@@ -1,4 +1,4 @@
-package app
+package cli
 
 import (
 	"github.com/jh125486/CSCE3550/pkg/client"
@@ -10,6 +10,8 @@ import (
 type (
 	// CLI defines the command-line interface structure for the gradebot application.
 	CLI struct {
+		basecli.BaseCLI `embed:""`
+
 		Project1 Project1Cmd `cmd:"" help:"Execute project1 grading client"`
 		Project2 Project2Cmd `cmd:"" help:"Execute project2 grading client"`
 		Project3 Project3Cmd `cmd:"" help:"Execute project3 grading client"`
@@ -22,18 +24,19 @@ type (
 	// Project2Cmd defines the command structure for running Project 2 grading.
 	Project2Cmd struct {
 		basecli.CommonArgs `embed:""`
-		PortArg            `embed:""`
-		CodeDirArg         `embed:""`
-		DBFileCodeArg      `embed:""`
+		CommonProjectArgs  `embed:""`
 	}
 	// Project3Cmd defines the command structure for running Project 3 grading.
 	Project3Cmd struct {
 		basecli.CommonArgs `embed:""`
-		PortArg            `embed:""`
-		CodeDirArg         `embed:""`
-		DBFileCodeArg      `embed:""`
+		CommonProjectArgs  `embed:""`
 	}
 
+	CommonProjectArgs struct {
+		PortArg       `embed:""`
+		CodeDirArg    `embed:""`
+		DBFileCodeArg `embed:""`
+	}
 	PortArg struct {
 		Port int `default:"8080" help:"Port to check" name:"port" short:"p"`
 	}
