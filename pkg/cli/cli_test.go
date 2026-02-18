@@ -1,4 +1,4 @@
-package app_test
+package cli_test
 
 import (
 	"bytes"
@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	"github.com/alecthomas/kong"
-	"github.com/jh125486/CSCE3550/pkg/app"
+	"github.com/jh125486/CSCE3550/pkg/cli"
 	basecli "github.com/jh125486/gradebot/pkg/cli"
 	baseclient "github.com/jh125486/gradebot/pkg/client"
 	baserubrics "github.com/jh125486/gradebot/pkg/rubrics"
@@ -43,6 +43,7 @@ func (n *nopCmd) SetDir(string)       {}
 func (n *nopCmd) SetStdin(io.Reader)  {}
 func (n *nopCmd) SetStdout(io.Writer) {}
 func (n *nopCmd) SetStderr(io.Writer) {}
+func (n *nopCmd) SetEnv([]string)     {}
 func (n *nopCmd) Start() error        { return nil }
 func (n *nopCmd) Run() error          { return nil }
 func (n *nopCmd) ProcessKill() error  { return nil }
@@ -58,7 +59,7 @@ func newTestService() *basecli.Service {
 		Client:         newMockClient(),
 		Stdin:          strings.NewReader("n\n"),
 		Stdout:         &bytes.Buffer{},
-		CommandBuilder: &nopBuilder{},
+		CommandBuilder: (&nopBuilder{}).New,
 	}
 }
 
@@ -90,14 +91,14 @@ func TestProject1CmdRun(t *testing.T) {
 			t.Parallel()
 			tempDir := t.TempDir()
 
-			cmd := &app.Project1Cmd{
+			cmd := &cli.Project1Cmd{
 				CommonArgs: basecli.CommonArgs{
 					WorkDir:   baseclient.WorkDir(tempDir),
 					RunCmd:    "echo test",
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
-				PortArg: app.PortArg{
+				PortArg: cli.PortArg{
 					Port: tt.args.port,
 				},
 			}
@@ -141,21 +142,23 @@ func TestProject2CmdRun(t *testing.T) {
 			t.Parallel()
 			tempDir := t.TempDir()
 
-			cmd := &app.Project2Cmd{
+			cmd := &cli.Project2Cmd{
 				CommonArgs: basecli.CommonArgs{
 					WorkDir:   baseclient.WorkDir(tempDir),
 					RunCmd:    "echo test",
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
-				PortArg: app.PortArg{
-					Port: tt.args.port,
-				},
-				DBFileCodeArg: app.DBFileCodeArg{
-					DatabaseFile: path.Join(tempDir, tt.args.databaseFile),
-				},
-				CodeDirArg: app.CodeDirArg{
-					CodeDir: tt.args.codeDir,
+				CommonProjectArgs: cli.CommonProjectArgs{
+					PortArg: cli.PortArg{
+						Port: tt.args.port,
+					},
+					DBFileCodeArg: cli.DBFileCodeArg{
+						DatabaseFile: path.Join(tempDir, tt.args.databaseFile),
+					},
+					CodeDirArg: cli.CodeDirArg{
+						CodeDir: tt.args.codeDir,
+					},
 				},
 			}
 			require.NoError(t, kong.ApplyDefaults(cmd))
@@ -197,21 +200,23 @@ func TestProject3CmdRun(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			cmd := &app.Project3Cmd{
+			cmd := &cli.Project3Cmd{
 				CommonArgs: basecli.CommonArgs{
 					WorkDir:   baseclient.WorkDir(t.TempDir()),
 					RunCmd:    "echo test",
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
-				PortArg: app.PortArg{
-					Port: tt.args.port,
-				},
-				DBFileCodeArg: app.DBFileCodeArg{
-					DatabaseFile: path.Join(t.TempDir(), tt.args.databaseFile),
-				},
-				CodeDirArg: app.CodeDirArg{
-					CodeDir: tt.args.codeDir,
+				CommonProjectArgs: cli.CommonProjectArgs{
+					PortArg: cli.PortArg{
+						Port: tt.args.port,
+					},
+					DBFileCodeArg: cli.DBFileCodeArg{
+						DatabaseFile: path.Join(t.TempDir(), tt.args.databaseFile),
+					},
+					CodeDirArg: cli.CodeDirArg{
+						CodeDir: tt.args.codeDir,
+					},
 				},
 			}
 
