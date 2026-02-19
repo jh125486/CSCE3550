@@ -23,3 +23,4 @@ go.work
 gradebot
 
 totally_not_my_privateKeys.db
+.claude/settings.local.json
