@@ -72,7 +72,7 @@ type (
 		ValidJWT     *jwt.Token
 		ExpiredJWT   *jwt.Token
 		Username     string
-		Password     string
+		Password     string // #nosec G117 -- Used for testing, not real creds
 		DatabaseFile string
 		SrcDir       string
 		HTTPClient   *http.Client
@@ -141,6 +141,20 @@ func WithUsername(username string) EvalContextOption {
 	}
 }
 
+// NewRequest creates a new request combining the HostURL and endpoint
+func (ec *EvalContext) NewRequest(ctx context.Context, method, endpoint string, body io.Reader) (*http.Request, error) {
+	u, err := url.Parse(ec.HostURL)
+	if err != nil {
+		return nil, err
+	}
+	u.Path, err = url.JoinPath(u.Path, endpoint)
+	if err != nil {
+		return nil, err
+	}
+	// #nosec G704 -- The URL is constructed from the configuration and is intended to be used directly.
+	return http.NewRequestWithContext(ctx, method, u.String(), body)
+}
+
 func defaultJWTParser(jwksEndpoint string, options keyfunc.Options) func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
 	return func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
 		jwks, err := keyfunc.Get(jwksEndpoint, options)
@@ -199,7 +213,7 @@ func EvaluateExpiredJWT(_ context.Context, _ baserubrics.ProgramRunner, bag base
 }
 
 // EvaluateHTTPMethods checks if proper HTTP methods and status codes are used
-func EvaluateHTTPMethods(_ context.Context, _ baserubrics.ProgramRunner, bag baserubrics.RunBag) baserubrics.RubricItem {
+func EvaluateHTTPMethods(ctx context.Context, _ baserubrics.ProgramRunner, bag baserubrics.RunBag) baserubrics.RubricItem {
 	item := baserubrics.RubricItem{
 		Name:    "Proper HTTP methods/Status codes",
 		Points:  10,
@@ -227,11 +241,11 @@ func EvaluateHTTPMethods(_ context.Context, _ baserubrics.ProgramRunner, bag bas
 
 	for endpoint, methods := range badMethods {
 		for _, method := range methods {
-			req, err := http.NewRequestWithContext(context.Background(), method, ec.HostURL+endpoint, http.NoBody)
+			req, err := ec.NewRequest(ctx, method, endpoint, http.NoBody)
 			if err != nil {
 				continue
 			}
-			resp, err := client.Do(req)
+			resp, err := client.Do(req) // #nosec G704
 			if err != nil {
 				continue
 			}
@@ -269,9 +283,9 @@ func EvaluateValidJWKInJWKS(_ context.Context, _ baserubrics.ProgramRunner, bag 
 	_, err = jwt.ParseWithClaims(ec.ValidJWT.Raw, &jwt.RegisteredClaims{}, jwks.Keyfunc)
 	if err != nil {
 		item.Note = err.Error()
-		req, err2 := http.NewRequestWithContext(context.Background(), http.MethodGet, ec.HostURL+JWKSEndpoint, http.NoBody)
+		req, err2 := ec.NewRequest(context.Background(), http.MethodGet, JWKSEndpoint, http.NoBody)
 		if err2 == nil {
-			resp, err3 := ec.HTTPClient.Do(req)
+			resp, err3 := ec.HTTPClient.Do(req) // #nosec G704
 			if err3 == nil {
 				defer resp.Body.Close()
 				b, _ := httputil.DumpResponse(resp, true)
@@ -517,7 +531,7 @@ func EvaluateRegistrationWorks(_ context.Context, _ baserubrics.ProgramRunner, b
 	}
 
 	var body struct {
-		Password string `json:"password"`
+		Password string `json:"password"` // #nosec G117 -- test field
 	}
 	if err := json.Unmarshal(b, &body); err != nil {
 		item.Note = err.Error()
@@ -702,7 +716,7 @@ func authentication(ec *EvalContext, expired bool) (*jwt.Token, error) {
 	}
 
 	var jsonBody struct {
-		JWT   string `json:"jwt"`
+		JWT   string `json:"jwt"` // #nosec G117 -- test field
 		Token string `json:"token"`
 	}
 	if err := json.Unmarshal(body, &jsonBody); err == nil {
@@ -730,14 +744,14 @@ func authenticatePostJSON(ec *EvalContext, expired bool) (*http.Response, error)
 	var bb bytes.Buffer
 	if err := json.NewEncoder(&bb).Encode(struct {
 		Username string `json:"username"`
-		Password string `json:"password"`
+		Password string `json:"password"` // #nosec G117 -- test field
 	}{
 		Username: Username,
 		Password: Password,
 	}); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ec.HostURL+AuthEndpoint, &bb)
+	req, err := ec.NewRequest(context.Background(), http.MethodPost, AuthEndpoint, &bb)
 	if err != nil {
 		return nil, err
 	}
@@ -749,7 +763,7 @@ func authenticatePostJSON(ec *EvalContext, expired bool) (*http.Response, error)
 		req.URL.RawQuery = q.Encode()
 	}
 
-	return ec.HTTPClient.Do(req)
+	return ec.HTTPClient.Do(req) // #nosec G704
 }
 
 func authenticatePostForm(ec *EvalContext, expired bool) (*http.Response, error) {
@@ -757,7 +771,7 @@ func authenticatePostForm(ec *EvalContext, expired bool) (*http.Response, error)
 	data.Set("username", Username)
 	data.Set("password", Password)
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ec.HostURL+AuthEndpoint, strings.NewReader(data.Encode()))
+	req, err := ec.NewRequest(context.Background(), http.MethodPost, AuthEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -770,7 +784,7 @@ func authenticatePostForm(ec *EvalContext, expired bool) (*http.Response, error)
 		req.URL.RawQuery = q.Encode()
 	}
 
-	return ec.HTTPClient.Do(req)
+	return ec.HTTPClient.Do(req) // #nosec G704
 }
 
 func registration(ec *EvalContext, username string) (*http.Response, error) {
@@ -782,14 +796,14 @@ func registration(ec *EvalContext, username string) (*http.Response, error) {
 	if err := json.NewEncoder(&bb).Encode(payload); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ec.HostURL+RegistrationEndpoint, &bb)
+	req, err := ec.NewRequest(context.Background(), http.MethodPost, RegistrationEndpoint, &bb)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept-Type", "application/json")
 
-	return ec.HTTPClient.Do(req)
+	return ec.HTTPClient.Do(req) // #nosec G704
 }
 
 func authenticationWithCreds(ec *EvalContext, username, password string) (*http.Response, error) {
@@ -801,14 +815,14 @@ func authenticationWithCreds(ec *EvalContext, username, password string) (*http.
 		return nil, err
 	}
 
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ec.HostURL+AuthEndpoint, &bb)
+	req, err := ec.NewRequest(context.Background(), http.MethodPost, AuthEndpoint, &bb)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept-Type", "application/json")
 
-	resp, err := ec.HTTPClient.Do(req)
+	resp, err := ec.HTTPClient.Do(req) // #nosec G704
 	if err != nil {
 		return nil, err
 	}
