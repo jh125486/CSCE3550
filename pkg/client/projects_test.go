@@ -14,6 +14,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+const (
+	testEchoTestCmd     = "echo test"
+	testProgramRunFails = "program run fails"
+	testNonexistentCmd  = "nonexistent-cmd-123"
+	testDatabaseFile    = "/tmp/test.db"
+)
+
 type mockTransport struct {
 	roundTrip func(*http.Request) (*http.Response, error)
 }
@@ -49,7 +56,7 @@ func TestExecuteProject1_NilProgram(t *testing.T) {
 	ctx := t.Context()
 	cfg := &baseclient.Config{
 		WorkDir: baseclient.WorkDir(t.TempDir()),
-		RunCmd:  "echo test",
+		RunCmd:  testEchoTestCmd,
 		Writer:  io.Discard,
 		// ProgramBuilder is nil - exercises the default builder branch
 	}
@@ -69,13 +76,13 @@ func TestExecuteProject1(t *testing.T) {
 		{
 			name:    "valid port",
 			port:    8080,
-			runCmd:  "echo test",
+			runCmd:  testEchoTestCmd,
 			wantErr: false, // Won't error because program doesn't actually run
 		},
 		{
-			name:    "program run fails",
+			name:    testProgramRunFails,
 			port:    8080,
-			runCmd:  "nonexistent-cmd-123",
+			runCmd:  testNonexistentCmd,
 			wantErr: true,
 		},
 	}
@@ -113,7 +120,7 @@ func TestExecuteProject2_NilProgram(t *testing.T) {
 	ctx := t.Context()
 	cfg := &baseclient.Config{
 		WorkDir: baseclient.WorkDir(t.TempDir()),
-		RunCmd:  "echo test",
+		RunCmd:  testEchoTestCmd,
 		Writer:  io.Discard,
 	}
 	_ = client.ExecuteProject2(ctx, cfg, newMockClient(), 8080, "test.db", ".")
@@ -132,17 +139,17 @@ func TestExecuteProject2(t *testing.T) {
 		{
 			name:         "valid parameters",
 			port:         8080,
-			databaseFile: "/tmp/test.db",
+			databaseFile: testDatabaseFile,
 			codeDir:      ".",
-			runCmd:       "echo test",
+			runCmd:       testEchoTestCmd,
 			wantErr:      false, // Won't error because program doesn't actually run
 		},
 		{
-			name:         "program run fails",
+			name:         testProgramRunFails,
 			port:         8080,
-			databaseFile: "/tmp/test.db",
+			databaseFile: testDatabaseFile,
 			codeDir:      ".",
-			runCmd:       "nonexistent-cmd-123",
+			runCmd:       testNonexistentCmd,
 			wantErr:      true,
 		},
 	}
@@ -180,7 +187,7 @@ func TestExecuteProject3_NilProgram(t *testing.T) {
 	ctx := t.Context()
 	cfg := &baseclient.Config{
 		WorkDir: baseclient.WorkDir(t.TempDir()),
-		RunCmd:  "echo test",
+		RunCmd:  testEchoTestCmd,
 		Writer:  io.Discard,
 	}
 	_ = client.ExecuteProject3(ctx, cfg, newMockClient(), 8080, "test.db", ".")
@@ -199,17 +206,17 @@ func TestExecuteProject3(t *testing.T) {
 		{
 			name:         "valid parameters",
 			port:         8080,
-			databaseFile: "/tmp/test.db",
+			databaseFile: testDatabaseFile,
 			codeDir:      ".",
-			runCmd:       "echo test",
+			runCmd:       testEchoTestCmd,
 			wantErr:      false, // Won't error because program doesn't actually run
 		},
 		{
-			name:         "program run fails",
+			name:         testProgramRunFails,
 			port:         8080,
-			databaseFile: "/tmp/test.db",
+			databaseFile: testDatabaseFile,
 			codeDir:      ".",
-			runCmd:       "nonexistent-cmd-123",
+			runCmd:       testNonexistentCmd,
 			wantErr:      true,
 		},
 	}

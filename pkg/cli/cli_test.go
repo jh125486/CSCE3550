@@ -16,6 +16,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testCaseSuccess = "success"
+	testServerURL   = "http://example.com"
+	testEchoTestCmd = "echo test"
+)
+
 type mockTransport struct {
 	roundTrip func(*http.Request) (*http.Response, error)
 }
@@ -76,10 +82,10 @@ func TestProject1CmdRun(t *testing.T) {
 		wantErr require.ErrorAssertionFunc
 	}{
 		{
-			name: "success",
+			name: testCaseSuccess,
 			args: args{
 				port:      8080,
-				serverURL: "http://example.com",
+				serverURL: testServerURL,
 				svc:       newTestService(),
 			},
 			wantErr: require.NoError,
@@ -94,7 +100,7 @@ func TestProject1CmdRun(t *testing.T) {
 			cmd := &cli.Project1Cmd{
 				CommonArgs: basecli.CommonArgs{
 					WorkDir:   baseclient.WorkDir(tempDir),
-					RunCmd:    "echo test",
+					RunCmd:    testEchoTestCmd,
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
@@ -125,12 +131,12 @@ func TestProject2CmdRun(t *testing.T) {
 		wantErr require.ErrorAssertionFunc
 	}{
 		{
-			name: "success",
+			name: testCaseSuccess,
 			args: args{
 				port:         8080,
 				codeDir:      ".",
 				databaseFile: "test.db",
-				serverURL:    "http://example.com",
+				serverURL:    testServerURL,
 				svc:          newTestService(),
 			},
 			wantErr: require.NoError,
@@ -145,7 +151,7 @@ func TestProject2CmdRun(t *testing.T) {
 			cmd := &cli.Project2Cmd{
 				CommonArgs: basecli.CommonArgs{
 					WorkDir:   baseclient.WorkDir(tempDir),
-					RunCmd:    "echo test",
+					RunCmd:    testEchoTestCmd,
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
@@ -184,12 +190,12 @@ func TestProject3CmdRun(t *testing.T) {
 		wantErr require.ErrorAssertionFunc
 	}{
 		{
-			name: "success",
+			name: testCaseSuccess,
 			args: args{
 				port:         8080,
 				codeDir:      ".",
 				databaseFile: "test.db",
-				serverURL:    "http://example.com",
+				serverURL:    testServerURL,
 				svc:          newTestService(),
 			},
 			wantErr: require.NoError,
@@ -203,7 +209,7 @@ func TestProject3CmdRun(t *testing.T) {
 			cmd := &cli.Project3Cmd{
 				CommonArgs: basecli.CommonArgs{
 					WorkDir:   baseclient.WorkDir(t.TempDir()),
-					RunCmd:    "echo test",
+					RunCmd:    testEchoTestCmd,
 					Env:       map[string]string{},
 					ServerURL: tt.args.serverURL,
 				},
