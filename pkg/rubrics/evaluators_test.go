@@ -32,6 +32,17 @@ const (
 	testUUIDPasswordJSON = `{"password":"550e8400-e29b-41d4-a716-446655440000"}`
 	validJWKInJWKS       = "ValidJWKInJWKS"
 	expiredJWTToken      = "expired.jwt.token"
+	testHostURL          = "http://localhost:8080"
+	testInvalidHostURL   = "http://localhost:9999"
+	testValueTest        = "test"
+	testValuePass        = "pass"
+	testKeysTable        = "keys"
+	testUsersTable       = "users"
+	testUserSubject      = "test-user"
+	testUsername         = "testuser"
+	testPassword         = "testpass"
+	testAuthEndpoint     = "/auth"
+	testPostJSONFunc     = "postJSON"
 )
 
 // mockRoundTripper allows mocking HTTP responses for testing
@@ -237,9 +248,9 @@ func TestEvalContextFields(t *testing.T) {
 		{
 			name: "all fields set",
 			ec: rubrics.EvalContext{
-				HostURL:      "http://localhost:8080",
-				Username:     "test",
-				Password:     "pass",
+				HostURL:      testHostURL,
+				Username:     testValueTest,
+				Password:     testValuePass,
 				DatabaseFile: filepath.Join(os.TempDir(), "test.db"),
 				SrcDir:       "/src",
 			},
@@ -274,7 +285,7 @@ func TestNewEvalContextOptions(t *testing.T) {
 		{
 			name: "WithSrcDir sets source directory",
 			args: args{
-				hostURL: "http://localhost:8080",
+				hostURL: testHostURL,
 				opts: []rubrics.EvalContextOption{
 					rubrics.WithJWTParser(mockJWTParser()),
 					rubrics.WithSrcDir("/custom/src/path"),
@@ -287,20 +298,20 @@ func TestNewEvalContextOptions(t *testing.T) {
 		{
 			name: "WithUsername sets username",
 			args: args{
-				hostURL: "http://localhost:8080",
+				hostURL: testHostURL,
 				opts: []rubrics.EvalContextOption{
 					rubrics.WithJWTParser(mockJWTParser()),
-					rubrics.WithUsername("testuser"),
+					rubrics.WithUsername(testUsername),
 				},
 			},
 			verify: func(t *testing.T, ec *rubrics.EvalContext) {
-				assert.Equal(t, "testuser", ec.Username)
+				assert.Equal(t, testUsername, ec.Username)
 			},
 		},
 		{
 			name: "multiple options combined",
 			args: args{
-				hostURL: "http://localhost:8080",
+				hostURL: testHostURL,
 				opts: []rubrics.EvalContextOption{
 					rubrics.WithJWTParser(mockJWTParser()),
 					rubrics.WithSrcDir("/src"),
@@ -312,13 +323,13 @@ func TestNewEvalContextOptions(t *testing.T) {
 				assert.Equal(t, "/src", ec.SrcDir)
 				assert.Equal(t, "admin", ec.Username)
 				assert.Equal(t, "/data/test.db", ec.DatabaseFile)
-				assert.Equal(t, "http://localhost:8080", ec.HostURL)
+				assert.Equal(t, testHostURL, ec.HostURL)
 			},
 		},
 		{
 			name: "empty SrcDir option",
 			args: args{
-				hostURL: "http://localhost:8080",
+				hostURL: testHostURL,
 				opts: []rubrics.EvalContextOption{
 					rubrics.WithJWTParser(mockJWTParser()),
 					rubrics.WithSrcDir(""),
@@ -331,7 +342,7 @@ func TestNewEvalContextOptions(t *testing.T) {
 		{
 			name: "empty Username option",
 			args: args{
-				hostURL: "http://localhost:8080",
+				hostURL: testHostURL,
 				opts: []rubrics.EvalContextOption{
 					rubrics.WithJWTParser(mockJWTParser()),
 					rubrics.WithUsername(""),
@@ -371,7 +382,7 @@ func createJWKSJSON(t *testing.T, publicKey *rsa.PublicKey, kid string) string {
 	eBytes := big.NewInt(int64(publicKey.E)).Bytes()
 
 	jwks := map[string]any{
-		"keys": []map[string]any{
+		testKeysTable: []map[string]any{
 			{
 				"kty": "RSA",
 				"use": "sig",
@@ -417,7 +428,7 @@ func TestDefaultJWTParser(t *testing.T) {
 				kid := "test-key-1"
 				jwksJSON := createJWKSJSON(t, &privateKey.PublicKey, kid)
 				claims := jwt.RegisteredClaims{
-					Subject:   "test-user",
+					Subject:   testUserSubject,
 					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 					IssuedAt:  jwt.NewNumericDate(time.Now()),
 				}
@@ -431,7 +442,7 @@ func TestDefaultJWTParser(t *testing.T) {
 					}, nil
 				})
 
-				ec := rubrics.NewEvalContext("http://localhost:8080",
+				ec := rubrics.NewEvalContext(testHostURL,
 					rubrics.WithHTTPClient(mockClient),
 				)
 				return ec, signedJWT
@@ -448,7 +459,7 @@ func TestDefaultJWTParser(t *testing.T) {
 				kid := "test-key-1"
 				jwksJSON := createJWKSJSON(t, &jwksKey.PublicKey, kid)
 				claims := jwt.RegisteredClaims{
-					Subject:   "test-user",
+					Subject:   testUserSubject,
 					ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 				}
 				signedJWT := signJWTWithKey(t, signingKey, kid, claims)
@@ -461,7 +472,7 @@ func TestDefaultJWTParser(t *testing.T) {
 					}, nil
 				})
 
-				ec := rubrics.NewEvalContext("http://localhost:8080",
+				ec := rubrics.NewEvalContext(testHostURL,
 					rubrics.WithHTTPClient(mockClient),
 				)
 				return ec, signedJWT
@@ -478,7 +489,7 @@ func TestDefaultJWTParser(t *testing.T) {
 					return nil, errors.New("connection refused")
 				})
 
-				ec := rubrics.NewEvalContext("http://localhost:8080",
+				ec := rubrics.NewEvalContext(testHostURL,
 					rubrics.WithHTTPClient(mockClient),
 				)
 				return ec, "any.jwt.token"
@@ -522,7 +533,7 @@ func TestEvaluateValidJWKInJWKSSuccess(t *testing.T) {
 
 	// Create and sign a valid JWT
 	claims := jwt.RegisteredClaims{
-		Subject:   "test-user",
+		Subject:   testUserSubject,
 		ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 		IssuedAt:  jwt.NewNumericDate(time.Now()),
 	}
@@ -547,7 +558,7 @@ func TestEvaluateValidJWKInJWKSSuccess(t *testing.T) {
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
 	ec := &rubrics.EvalContext{
-		HostURL:    "http://localhost:8080",
+		HostURL:    testHostURL,
 		ValidJWT:   validToken,
 		HTTPClient: mockClient,
 	}
@@ -626,8 +637,8 @@ func TestEvaluateTableExistsWithDatabase(t *testing.T) {
 		points      float64
 		wantAwarded float64
 	}{
-		{"keys table exists", "keys", 5.0, 5.0},
-		{"users table exists", "users", 10.0, 10.0},
+		{"keys table exists", testKeysTable, 5.0, 5.0},
+		{"users table exists", testUsersTable, 10.0, 10.0},
 		{"auth_logs table exists", "auth_logs", 15.0, 15.0},
 		{"nonexistent table", "nonexistent_table", 5.0, 0.0},
 	}
@@ -729,7 +740,7 @@ func TestEvaluatePrivateKeysEncrypted(t *testing.T) {
 			name: "database does not exist",
 			setupBag: func(_ *testing.T) baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
-				bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+				bag["evalContext"] = rubrics.NewEvalContext(testHostURL,
 					rubrics.WithDatabaseFile("/nonexistent.db"),
 				)
 				return bag
@@ -740,7 +751,7 @@ func TestEvaluatePrivateKeysEncrypted(t *testing.T) {
 			name: "empty database file",
 			setupBag: func(_ *testing.T) baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
-				bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+				bag["evalContext"] = rubrics.NewEvalContext(testHostURL,
 					rubrics.WithDatabaseFile(""),
 				)
 				return bag
@@ -826,7 +837,7 @@ func TestEvaluateAuthLoggingWithData(t *testing.T) {
 	require.NoError(t, err)
 
 	// Insert test data
-	_, err = db.ExecContext(ctx, "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash123")
+	_, err = db.ExecContext(ctx, "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "hash123")
 	require.NoError(t, err)
 
 	_, err = db.ExecContext(ctx, "INSERT INTO auth_logs (request_ip, user_id) VALUES (?, ?)", "192.168.1.1", 1)
@@ -875,7 +886,7 @@ func TestEvaluateValidJWTErrorCases(t *testing.T) {
 		name    string
 		hostURL string
 	}{
-		{name: "invalid URL", hostURL: "http://localhost:9999"},
+		{name: "invalid URL", hostURL: testInvalidHostURL},
 		{name: "empty URL", hostURL: ""},
 	}
 
@@ -905,7 +916,7 @@ func TestEvaluateExpiredJWTErrorCases(t *testing.T) {
 		name    string
 		hostURL string
 	}{
-		{name: "invalid URL", hostURL: "http://localhost:9999"},
+		{name: "invalid URL", hostURL: testInvalidHostURL},
 		{name: "empty URL", hostURL: ""},
 	}
 
@@ -945,7 +956,7 @@ func TestEvaluateValidJWKInJWKSErrorPaths(t *testing.T) {
 			name: "no valid JWT",
 			setupBag: func() baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
-				ec := &rubrics.EvalContext{HostURL: "http://localhost:8080"}
+				ec := &rubrics.EvalContext{HostURL: testHostURL}
 				bag["evalContext"] = ec
 				return bag
 			},
@@ -957,7 +968,7 @@ func TestEvaluateValidJWKInJWKSErrorPaths(t *testing.T) {
 			setupBag: func() baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{
-					HostURL:  "http://localhost:9999",
+					HostURL:  testInvalidHostURL,
 					ValidJWT: validJWT,
 					HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
 						return nil, errors.New("connection refused")
@@ -974,7 +985,7 @@ func TestEvaluateValidJWKInJWKSErrorPaths(t *testing.T) {
 			setupBag: func() baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{
-					HostURL:  "http://localhost:8080",
+					HostURL:  testHostURL,
 					ValidJWT: validJWT,
 					HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
 						return &http.Response{
@@ -1031,7 +1042,7 @@ func TestExpiredJWTEvaluatorsNoExpiredJWT(t *testing.T) {
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
-			ec := &rubrics.EvalContext{HostURL: "http://localhost:8080"}
+			ec := &rubrics.EvalContext{HostURL: testHostURL}
 			bag["evalContext"] = ec
 
 			result := tt.evaluator(ctx, pr, bag)
@@ -1052,8 +1063,8 @@ func TestEvaluateTableExistsMultipleTables(t *testing.T) {
 		points      float64
 		wantAwarded float64
 	}{
-		{name: "keys table", tableName: "keys", points: 5.0, wantAwarded: 5.0},
-		{name: "users table", tableName: "users", points: 5.0, wantAwarded: 5.0},
+		{name: "keys table", tableName: testKeysTable, points: 5.0, wantAwarded: 5.0},
+		{name: "users table", tableName: testUsersTable, points: 5.0, wantAwarded: 5.0},
 		{name: "auth_logs table", tableName: "auth_logs", points: 5.0, wantAwarded: 5.0},
 		{name: "nonexistent", tableName: "fake_table", points: 5.0, wantAwarded: 0.0},
 	}
@@ -1081,7 +1092,7 @@ func TestEvaluateHTTPMethodsInvalidURL(t *testing.T) {
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:9999")
+	bag["evalContext"] = rubrics.NewEvalContext(testInvalidHostURL)
 
 	result := rubrics.EvaluateHTTPMethods(ctx, pr, bag)
 	assert.NotNil(t, result)
@@ -1093,7 +1104,7 @@ func TestEvaluateRegistrationWorksInvalidURL(t *testing.T) {
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:9999")
+	bag["evalContext"] = rubrics.NewEvalContext(testInvalidHostURL)
 
 	result := rubrics.EvaluateRegistrationWorks(ctx, pr, bag)
 	assert.NotNil(t, result)
@@ -1107,16 +1118,16 @@ func TestEvaluateRateLimitingInvalidEndpoint(t *testing.T) {
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
 	ec := &rubrics.EvalContext{
-		HostURL:  "http://localhost:9999",
-		Username: "testuser",
-		Password: "testpass",
+		HostURL:  testInvalidHostURL,
+		Username: testUsername,
+		Password: testPassword,
 		HTTPClient: newMockClient(func(_ *http.Request) (*http.Response, error) {
 			return nil, errors.New("connection refused")
 		}),
 	}
 	bag["evalContext"] = ec
 
-	evaluator := rubrics.EvaluateRateLimiting("/auth", 10)
+	evaluator := rubrics.EvaluateRateLimiting(testAuthEndpoint, 10)
 	result := evaluator(ctx, pr, bag)
 
 	assert.Equal(t, 25.0, result.Points)
@@ -1228,7 +1239,7 @@ func TestEvaluateTableExistsErrorPaths(t *testing.T) {
 			name: "invalid database path",
 			setupBag: func(_ *testing.T) baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
-				bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+				bag["evalContext"] = rubrics.NewEvalContext(testHostURL,
 					rubrics.WithDatabaseFile("/nonexistent/db.sqlite"),
 				)
 				return bag
@@ -1243,7 +1254,7 @@ func TestEvaluateTableExistsErrorPaths(t *testing.T) {
 				require.NoError(t, err)
 
 				bag := make(baserubrics.RunBag)
-				bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+				bag["evalContext"] = rubrics.NewEvalContext(testHostURL,
 					rubrics.WithDatabaseFile(tmpFile),
 					rubrics.WithJWTParser(mockJWTParser()),
 				)
@@ -1259,7 +1270,7 @@ func TestEvaluateTableExistsErrorPaths(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := tt.setupBag(t)
 
-			evaluator := rubrics.EvaluateTableExists("keys", 5.0)
+			evaluator := rubrics.EvaluateTableExists(testKeysTable, 5.0)
 			result := evaluator(ctx, pr, bag)
 
 			assert.NotNil(t, result)
@@ -1350,7 +1361,7 @@ func TestHTTPClientInjection(t *testing.T) {
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+	bag["evalContext"] = rubrics.NewEvalContext(testHostURL,
 		rubrics.WithHTTPClient(mockClient),
 	)
 
@@ -1444,7 +1455,7 @@ func TestAuthenticationWithMockHTTP(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.args.httpClient,
 				JWTParser: func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
 					token, _, err := jwt.NewParser().ParseUnverified(tokenString, claims)
@@ -1555,10 +1566,10 @@ func TestRegistrationWithMockHTTP(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:      "http://localhost:8080",
+				HostURL:      testHostURL,
 				DatabaseFile: dbFile,
 				HTTPClient:   tt.args.httpClient,
-				Username:     "testuser",
+				Username:     testUsername,
 			}
 			bag["evalContext"] = ec
 
@@ -1585,7 +1596,7 @@ func TestRateLimitingWithMockHTTP(t *testing.T) {
 		{
 			name: "rate limiting works",
 			args: args{
-				endpoint: "/auth",
+				endpoint: testAuthEndpoint,
 				rps:      2,
 				httpClient: newMockClient(
 					func(_ *http.Request) (*http.Response, error) {
@@ -1601,7 +1612,7 @@ func TestRateLimitingWithMockHTTP(t *testing.T) {
 		{
 			name: "no rate limiting",
 			args: args{
-				endpoint: "/auth",
+				endpoint: testAuthEndpoint,
 				rps:      2,
 				httpClient: newMockClient(
 					func(_ *http.Request) (*http.Response, error) {
@@ -1617,7 +1628,7 @@ func TestRateLimitingWithMockHTTP(t *testing.T) {
 		{
 			name: "http error",
 			args: args{
-				endpoint: "/auth",
+				endpoint: testAuthEndpoint,
 				rps:      2,
 				httpClient: newMockClient(
 					func(_ *http.Request) (*http.Response, error) {
@@ -1636,9 +1647,9 @@ func TestRateLimitingWithMockHTTP(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
-				Username:   "testuser",
-				Password:   "testpass",
+				HostURL:    testHostURL,
+				Username:   testUsername,
+				Password:   testPassword,
 				HTTPClient: tt.args.httpClient,
 			}
 			bag["evalContext"] = ec
@@ -1661,7 +1672,7 @@ func TestAuthLoggingWithMockHTTP(t *testing.T) {
 	db, err := sqlx.Connect("sqlite", dbFile)
 	require.NoError(t, err)
 
-	_, err = db.ExecContext(ctx, "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hashvalue")
+	_, err = db.ExecContext(ctx, "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "hashvalue")
 	require.NoError(t, err)
 
 	_, err = db.ExecContext(ctx, "INSERT INTO auth_logs (request_ip, user_id) VALUES (?, ?)", "127.0.0.1", 1)
@@ -1715,9 +1726,9 @@ func TestAuthLoggingWithMockHTTP(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:      "http://localhost:8080",
+				HostURL:      testHostURL,
 				DatabaseFile: dbFile,
-				Username:     "testuser",
+				Username:     testUsername,
 				Password:     "password123",
 				HTTPClient:   tt.httpClient,
 			}
@@ -1771,7 +1782,7 @@ func TestExpiredJWTWithMockHTTP(t *testing.T) {
 			ctx := t.Context()
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
-			bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+			bag["evalContext"] = rubrics.NewEvalContext(testHostURL,
 				rubrics.WithHTTPClient(tt.httpClient),
 				rubrics.WithJWTParser(mockExpiredJWTParser()),
 			)
@@ -1804,7 +1815,7 @@ func TestJWKSValidationWithMockHTTP(t *testing.T) {
 			setupBag: func() baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{
-					HostURL: "http://localhost:8080",
+					HostURL: testHostURL,
 				}
 				bag["evalContext"] = ec
 				return bag
@@ -1824,7 +1835,7 @@ func TestJWKSValidationWithMockHTTP(t *testing.T) {
 			setupBag: func() baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{
-					HostURL: "http://localhost:8080",
+					HostURL: testHostURL,
 				}
 				bag["evalContext"] = ec
 				return bag
@@ -1844,7 +1855,7 @@ func TestJWKSValidationWithMockHTTP(t *testing.T) {
 			setupBag: func() baserubrics.RunBag {
 				bag := make(baserubrics.RunBag)
 				ec := &rubrics.EvalContext{
-					HostURL: "http://localhost:8080",
+					HostURL: testHostURL,
 				}
 				bag["evalContext"] = ec
 				return bag
@@ -1893,7 +1904,7 @@ func TestHelperFunctionsWithMockHTTP(t *testing.T) {
 	}{
 		{
 			name:     "authenticatePostJSON success",
-			testFunc: "postJSON",
+			testFunc: testPostJSONFunc,
 			httpClient: newMockClient(
 				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
@@ -1907,7 +1918,7 @@ func TestHelperFunctionsWithMockHTTP(t *testing.T) {
 		},
 		{
 			name:     "authenticatePostJSON expired",
-			testFunc: "postJSON",
+			testFunc: testPostJSONFunc,
 			httpClient: newMockClient(
 				func(_ *http.Request) (*http.Response, error) {
 					return &http.Response{
@@ -1963,7 +1974,7 @@ func TestHelperFunctionsWithMockHTTP(t *testing.T) {
 		},
 		{
 			name:     "HTTP error handling",
-			testFunc: "postJSON",
+			testFunc: testPostJSONFunc,
 			httpClient: newMockClient(
 				func(_ *http.Request) (*http.Response, error) {
 					return nil, errors.New("network error")
@@ -1981,17 +1992,17 @@ func TestHelperFunctionsWithMockHTTP(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
-				Username:   "testuser",
-				Password:   "testpass",
+				Username:   testUsername,
+				Password:   testPassword,
 			}
 			bag["evalContext"] = ec
 
 			// Test the evaluators which use these helper functions
 			var result baserubrics.RubricItem
 			switch tt.testFunc {
-			case "postJSON", "postForm":
+			case testPostJSONFunc, "postForm":
 				result = rubrics.EvaluateValidJWT(ctx, pr, bag)
 			case "registration":
 				dbFile := createTestDB(t)
@@ -2092,7 +2103,7 @@ func TestAuthenticationHelperEdgeCases(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
 				JWTParser: func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
 					token, _, err := jwt.NewParser().ParseUnverified(tokenString, claims)
@@ -2174,7 +2185,7 @@ func TestEvaluateExpiredJWTEdgeCases(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
 			}
 			bag["evalContext"] = ec
@@ -2364,10 +2375,10 @@ func TestEvaluateRegistrationWorksEdgeCases(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:      "http://localhost:8080",
+				HostURL:      testHostURL,
 				DatabaseFile: dbFile,
 				HTTPClient:   tt.httpClient,
-				Username:     "testuser",
+				Username:     testUsername,
 			}
 			if tt.setupDB != nil {
 				tt.setupDB(t, ec)
@@ -2388,7 +2399,7 @@ func TestEvaluateRegistrationWorksHashEqualsPassword(t *testing.T) {
 
 	db, err := sqlx.Connect("sqlite", dbFile)
 	require.NoError(t, err)
-	_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", password)
+	_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, password)
 	require.NoError(t, err)
 	_ = db.Close()
 
@@ -2405,10 +2416,10 @@ func TestEvaluateRegistrationWorksHashEqualsPassword(t *testing.T) {
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
 	ec := &rubrics.EvalContext{
-		HostURL:      "http://localhost:8080",
+		HostURL:      testHostURL,
 		DatabaseFile: dbFile,
 		HTTPClient:   httpClient,
-		Username:     "testuser",
+		Username:     testUsername,
 	}
 	bag["evalContext"] = ec
 
@@ -2433,9 +2444,9 @@ func TestEvaluateRegistrationWorksBodyReadError(t *testing.T) {
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
 	ec := &rubrics.EvalContext{
-		HostURL:    "http://localhost:8080",
+		HostURL:    testHostURL,
 		HTTPClient: httpClient,
-		Username:   "testuser",
+		Username:   testUsername,
 	}
 	bag["evalContext"] = ec
 
@@ -2468,7 +2479,7 @@ func TestEvaluateRegistrationWorksFullFlow(t *testing.T) {
 				t.Helper()
 				db, err := sqlx.Connect("sqlite", dbFile)
 				require.NoError(t, err)
-				_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hashed_password_value")
+				_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "hashed_password_value")
 				require.NoError(t, err)
 				_ = db.Close()
 			},
@@ -2503,7 +2514,7 @@ func TestEvaluateRegistrationWorksFullFlow(t *testing.T) {
 				t.Helper()
 				db, err := sqlx.Connect("sqlite", dbFile)
 				require.NoError(t, err)
-				_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "different_hash")
+				_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "different_hash")
 				require.NoError(t, err)
 				_ = db.Close()
 			},
@@ -2525,10 +2536,10 @@ func TestEvaluateRegistrationWorksFullFlow(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:      "http://localhost:8080",
+				HostURL:      testHostURL,
 				DatabaseFile: dbFile,
 				HTTPClient:   tt.httpClient,
-				Username:     "testuser",
+				Username:     testUsername,
 			}
 			bag["evalContext"] = ec
 
@@ -2559,7 +2570,7 @@ func TestEvaluateJWKSWithValidAndExpiredJWTs(t *testing.T) {
 			name: "ValidJWKInJWKS with JWKS error",
 			httpClient: newMockClient(
 				func(req *http.Request) (*http.Response, error) {
-					if strings.Contains(req.URL.Path, "/auth") {
+					if strings.Contains(req.URL.Path, testAuthEndpoint) {
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       io.NopCloser(strings.NewReader(`{"token":"` + validJWT + `"}`)),
@@ -2575,7 +2586,7 @@ func TestEvaluateJWKSWithValidAndExpiredJWTs(t *testing.T) {
 			name: "ExpiredJWKNotInJWKS with JWKS response",
 			httpClient: newMockClient(
 				func(req *http.Request) (*http.Response, error) {
-					if strings.Contains(req.URL.Path, "/auth") {
+					if strings.Contains(req.URL.Path, testAuthEndpoint) {
 						return &http.Response{
 							StatusCode: http.StatusOK,
 							Body:       io.NopCloser(strings.NewReader(`{"token":"` + expiredJWT + `"}`)),
@@ -2601,7 +2612,7 @@ func TestEvaluateJWKSWithValidAndExpiredJWTs(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
 			}
 			bag["evalContext"] = ec
@@ -2679,7 +2690,7 @@ func TestAuthenticatePostJSONEdgeCases(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
 			}
 			bag["evalContext"] = ec
@@ -2756,7 +2767,7 @@ func TestHTTPMethodsWithVariousResponses(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
 			}
 			bag["evalContext"] = ec
@@ -2817,7 +2828,7 @@ func TestCompleteJWKSFlow(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: httpClient,
 			}
 			bag["evalContext"] = ec
@@ -2852,7 +2863,7 @@ func TestEvaluateExpiredJWKNotInJWKS_KIDNotFound(t *testing.T) {
 
 	// Create expired token with missing kid
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		Subject:   "test",
+		Subject:   testValueTest,
 		ExpiresAt: jwt.NewNumericDate(time.Unix(1516239022, 0)),
 	})
 	token.Header["kid"] = "missing"
@@ -3008,7 +3019,7 @@ func TestEvaluateExpiredJWTScenarios(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
 				JWTParser: func(tokenString string, claims jwt.Claims) (*jwt.Token, error) {
 					token, _, err := jwt.NewParser().ParseUnverified(tokenString, claims)
@@ -3064,7 +3075,7 @@ func TestEvaluateAuthLoggingAllBranches(t *testing.T) {
 				dbFile := createTestDB(t)
 				db, err := sqlx.Connect("sqlite", dbFile)
 				require.NoError(t, err)
-				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "hash")
 				// Drop auth_logs table to cause query error
 				_, _ = db.ExecContext(t.Context(), "DROP TABLE auth_logs")
 				_ = db.Close()
@@ -3087,7 +3098,7 @@ func TestEvaluateAuthLoggingAllBranches(t *testing.T) {
 				dbFile := createTestDB(t)
 				db, err := sqlx.Connect("sqlite", dbFile)
 				require.NoError(t, err)
-				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "hash")
 				_, _ = db.ExecContext(t.Context(), "INSERT INTO auth_logs (request_ip, user_id) VALUES (?, ?)", "", 1)
 				_ = db.Close()
 				return dbFile
@@ -3109,7 +3120,7 @@ func TestEvaluateAuthLoggingAllBranches(t *testing.T) {
 				dbFile := createTestDB(t)
 				db, err := sqlx.Connect("sqlite", dbFile)
 				require.NoError(t, err)
-				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "hash")
 				_, _ = db.ExecContext(t.Context(), "INSERT INTO auth_logs (request_ip, request_timestamp, user_id) VALUES (?, ?, ?)", "1.2.3.4", "0001-01-01 00:00:00", 1)
 				_ = db.Close()
 				return dbFile
@@ -3132,7 +3143,7 @@ func TestEvaluateAuthLoggingAllBranches(t *testing.T) {
 				db, err := sqlx.Connect("sqlite", dbFile)
 				require.NoError(t, err)
 				// Insert user but NO auth_logs for this user
-				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+				_, _ = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "hash")
 				_ = db.Close()
 				return dbFile
 			},
@@ -3158,11 +3169,11 @@ func TestEvaluateAuthLoggingAllBranches(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:      "http://localhost:8080",
+				HostURL:      testHostURL,
 				DatabaseFile: dbFile,
 				HTTPClient:   tt.httpClient,
-				Username:     "testuser",
-				Password:     "testpass",
+				Username:     testUsername,
+				Password:     testPassword,
 			}
 			bag["evalContext"] = ec
 
@@ -3227,7 +3238,7 @@ func TestAuthenticationHelperReadBodyErrors(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
 			}
 			bag["evalContext"] = ec
@@ -3368,7 +3379,7 @@ func TestEvaluateHTTPMethodsRequestErrors(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
 			}
 			bag["evalContext"] = ec
@@ -3389,8 +3400,8 @@ func TestTableExistsHelper(t *testing.T) {
 		tableName string
 		wantExist bool
 	}{
-		{name: "keys table exists", tableName: "keys", wantExist: true},
-		{name: "users table exists", tableName: "users", wantExist: true},
+		{name: "keys table exists", tableName: testKeysTable, wantExist: true},
+		{name: "users table exists", tableName: testUsersTable, wantExist: true},
 		{name: "fake table does not exist", tableName: "nonexistent", wantExist: false},
 	}
 
@@ -3429,14 +3440,14 @@ func TestValidJWKInJWKSComprehensive(t *testing.T) {
 			setupJWT: func() *jwt.Token {
 				// Create a token with kid=1
 				token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-					Subject: "test",
+					Subject: testValueTest,
 				})
 				token.Header["kid"] = "1"
 				token.Raw = "valid.jwt.token"
 				return token
 			},
 			jwksResp: `{
-				"keys": [{
+				testKeysTable: [{
 					"kty": "RSA",
 					"use": "sig",
 					"kid": "1",
@@ -3450,7 +3461,7 @@ func TestValidJWKInJWKSComprehensive(t *testing.T) {
 			name: "ValidJWT present but JWKS fetch fails with httputil dump",
 			setupJWT: func() *jwt.Token {
 				token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-					Subject: "test",
+					Subject: testValueTest,
 				})
 				token.Header["kid"] = "1"
 				token.Raw = "valid.jwt.token"
@@ -3483,7 +3494,7 @@ func TestValidJWKInJWKSComprehensive(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				ValidJWT:   tt.setupJWT(),
 				HTTPClient: httpClient,
 			}
@@ -3509,7 +3520,7 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 			name: "ExpiredJWT with kid not in JWKS",
 			setupJWT: func() *jwt.Token {
 				token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-					Subject:   "test",
+					Subject:   testValueTest,
 					ExpiresAt: jwt.NewNumericDate(time.Unix(1516239022, 0)),
 				})
 				token.Header["kid"] = "999" // Non-existent kid
@@ -3517,7 +3528,7 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 				return token
 			},
 			jwksResp: `{
-				"keys": [{
+				testKeysTable: [{
 					"kty": "RSA",
 					"use": "sig",
 					"kid": "1",
@@ -3531,7 +3542,7 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 			name: "ExpiredJWT but JWKS fetch error",
 			setupJWT: func() *jwt.Token {
 				token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-					Subject:   "test",
+					Subject:   testValueTest,
 					ExpiresAt: jwt.NewNumericDate(time.Unix(1516239022, 0)),
 				})
 				token.Header["kid"] = "1"
@@ -3545,7 +3556,7 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 			name: "ExpiredJWT found in JWKS (should not happen)",
 			setupJWT: func() *jwt.Token {
 				token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-					Subject:   "test",
+					Subject:   testValueTest,
 					ExpiresAt: jwt.NewNumericDate(time.Unix(1516239022, 0)),
 				})
 				token.Header["kid"] = "1"
@@ -3553,7 +3564,7 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 				return token
 			},
 			jwksResp: `{
-				"keys": [{
+				testKeysTable: [{
 					"kty": "RSA",
 					"use": "sig",
 					"kid": "1",
@@ -3587,7 +3598,7 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				ExpiredJWT: tt.setupJWT(),
 				HTTPClient: httpClient,
 			}
@@ -3628,7 +3639,7 @@ func TestEvaluateExpiredJWTWithNilChecks(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
+				HostURL:    testHostURL,
 				HTTPClient: tt.httpClient,
 			}
 			bag["evalContext"] = ec
@@ -3656,7 +3667,7 @@ func TestEvaluateExpiredJWTErrorInAuthCall(t *testing.T) {
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+	bag["evalContext"] = rubrics.NewEvalContext(testHostURL,
 		rubrics.WithHTTPClient(httpClient),
 		rubrics.WithJWTParser(mockExpiredJWTParser()),
 	)
@@ -3691,7 +3702,7 @@ func TestAuthenticationFallbackLogic(t *testing.T) {
 	ctx := t.Context()
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
-	bag["evalContext"] = rubrics.NewEvalContext("http://localhost:8080",
+	bag["evalContext"] = rubrics.NewEvalContext(testHostURL,
 		rubrics.WithHTTPClient(httpClient),
 		rubrics.WithJWTParser(mockJWTParser()),
 	)
@@ -3764,14 +3775,14 @@ func TestRateLimitingStatusCodeChecks(t *testing.T) {
 			pr := mockProgramRunner{}
 			bag := make(baserubrics.RunBag)
 			ec := &rubrics.EvalContext{
-				HostURL:    "http://localhost:8080",
-				Username:   "testuser",
-				Password:   "testpass",
+				HostURL:    testHostURL,
+				Username:   testUsername,
+				Password:   testPassword,
 				HTTPClient: tt.setupClient(),
 			}
 			bag["evalContext"] = ec
 
-			evaluator := rubrics.EvaluateRateLimiting("/auth", 2)
+			evaluator := rubrics.EvaluateRateLimiting(testAuthEndpoint, 2)
 			result := evaluator(ctx, pr, bag)
 
 			assert.NotNil(t, result)
@@ -3799,9 +3810,9 @@ func TestEvaluateRateLimitingSuccess(t *testing.T) {
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
 	ec := &rubrics.EvalContext{
-		HostURL:    "http://localhost:8080",
+		HostURL:    testHostURL,
 		Username:   "user",
-		Password:   "pass",
+		Password:   testValuePass,
 		HTTPClient: client,
 	}
 	bag["evalContext"] = ec
@@ -3833,9 +3844,9 @@ func TestEvaluateRateLimitingFinalRequestError(t *testing.T) {
 	pr := mockProgramRunner{}
 	bag := make(baserubrics.RunBag)
 	ec := &rubrics.EvalContext{
-		HostURL:    "http://localhost:8080",
+		HostURL:    testHostURL,
 		Username:   "user",
-		Password:   "pass",
+		Password:   testValuePass,
 		HTTPClient: client,
 	}
 	bag["evalContext"] = ec
@@ -3874,7 +3885,7 @@ func TestDatabaseExistsRowsScanError(t *testing.T) {
 			)`)
 			require.NoError(t, err)
 
-			_, err = db.ExecContext(t.Context(), "INSERT INTO keys (key, exp, extra_col) VALUES (?, ?, ?)", []byte("test"), time.Now().Unix(), "extra")
+			_, err = db.ExecContext(t.Context(), "INSERT INTO keys (key, exp, extra_col) VALUES (?, ?, ?)", []byte(testValueTest), time.Now().Unix(), "extra")
 			require.NoError(t, err)
 			_ = db.Close()
 
@@ -3910,10 +3921,10 @@ func TestDbHelpersWithNonExistentDatabase(t *testing.T) {
 		pr := mockProgramRunner{}
 		bag := make(baserubrics.RunBag)
 		ec := &rubrics.EvalContext{
-			HostURL:      "http://localhost:8080",
+			HostURL:      testHostURL,
 			DatabaseFile: "/nonexistent/path/to/database.db",
 			HTTPClient:   httpClient,
-			Username:     "testuser",
+			Username:     testUsername,
 		}
 		bag["evalContext"] = ec
 
@@ -3932,7 +3943,7 @@ func TestDbHelpersWithNonExistentDatabase(t *testing.T) {
 		db, err := sqlx.Connect("sqlite", dbFile)
 		require.NoError(t, err)
 		// Insert user so dbGet succeeds
-		_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+		_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "hash")
 		require.NoError(t, err)
 		_ = db.Close()
 
@@ -3948,11 +3959,11 @@ func TestDbHelpersWithNonExistentDatabase(t *testing.T) {
 		pr := mockProgramRunner{}
 		bag := make(baserubrics.RunBag)
 		ec := &rubrics.EvalContext{
-			HostURL:      "http://localhost:8080",
+			HostURL:      testHostURL,
 			DatabaseFile: dbFile,
 			HTTPClient:   httpClient,
-			Username:     "testuser",
-			Password:     "testpass",
+			Username:     testUsername,
+			Password:     testPassword,
 		}
 		bag["evalContext"] = ec
 
@@ -3969,7 +3980,7 @@ func TestDbHelpersWithNonExistentDatabase(t *testing.T) {
 		db, err := sqlx.Connect("sqlite", dbFile)
 		require.NoError(t, err)
 		// Insert user and auth_log so dbSelect with multiple conditions is tested
-		_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", "testuser", "hash")
+		_, err = db.ExecContext(t.Context(), "INSERT INTO users (username, password_hash) VALUES (?, ?)", testUsername, "hash")
 		require.NoError(t, err)
 		_, err = db.ExecContext(t.Context(), "INSERT INTO auth_logs (request_ip, request_timestamp, user_id) VALUES (?, ?, ?)", "127.0.0.1", time.Now(), 1)
 		require.NoError(t, err)
@@ -3987,11 +3998,11 @@ func TestDbHelpersWithNonExistentDatabase(t *testing.T) {
 		pr := mockProgramRunner{}
 		bag := make(baserubrics.RunBag)
 		ec := &rubrics.EvalContext{
-			HostURL:      "http://localhost:8080",
+			HostURL:      testHostURL,
 			DatabaseFile: dbFile,
 			HTTPClient:   httpClient,
-			Username:     "testuser",
-			Password:     "testpass",
+			Username:     testUsername,
+			Password:     testPassword,
 		}
 		bag["evalContext"] = ec
 
