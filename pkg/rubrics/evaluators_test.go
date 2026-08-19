@@ -3436,7 +3436,7 @@ func TestValidJWKInJWKSComprehensive(t *testing.T) {
 		wantAwarded float64
 	}{
 		{
-			name: "ValidJWT present with successful JWKS lookup",
+			name: "JWKS lookup succeeds but JWT Raw is malformed so parse fails",
 			setupJWT: func() *jwt.Token {
 				// Create a token with kid=1
 				token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
