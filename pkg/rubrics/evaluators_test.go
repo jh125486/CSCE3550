@@ -3447,7 +3447,7 @@ func TestValidJWKInJWKSComprehensive(t *testing.T) {
 				return token
 			},
 			jwksResp: `{
-				testKeysTable: [{
+				"keys": [{
 					"kty": "RSA",
 					"use": "sig",
 					"kid": "1",
@@ -3528,7 +3528,7 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 				return token
 			},
 			jwksResp: `{
-				testKeysTable: [{
+				"keys": [{
 					"kty": "RSA",
 					"use": "sig",
 					"kid": "1",
@@ -3564,7 +3564,7 @@ func TestExpiredJWKNotInJWKSComprehensive(t *testing.T) {
 				return token
 			},
 			jwksResp: `{
-				testKeysTable: [{
+				"keys": [{
 					"kty": "RSA",
 					"use": "sig",
 					"kid": "1",
