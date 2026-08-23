@@ -23,10 +23,8 @@ jobs:
           cache: true
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: latest
-      
+        run: make lint
+
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.txt ./...
 
